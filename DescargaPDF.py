@@ -28,7 +28,7 @@ if st.sidebar.button("Cerrar sesión"):
     st.session_state["autenticado"] = False
     st.rerun()
 
-# ========== DATOS MOCK PARA DEMO ==========
+# ========== DATOS MOCK ==========
 clientes_demo = [
     {"nombre": "Clínica San Juan", "ruc": "212934-1-397239", "dv": "05", "direccion": "Calle 50, Panamá", "telefono": "61234567", "correo": "info@sanjuan.com"},
     {"nombre": "Empresa XYZ", "ruc": "180123-1-456789", "dv": "23", "direccion": "Avenida Central", "telefono": "67890123", "correo": "xyz@empresa.com"}
@@ -166,7 +166,7 @@ if st.button("Enviar Factura a DGI"):
                 }
             }
         }
-        url = "https://ninox-factory-server.onrender.com/enviar-factura"
+        url = "http://localhost:8000/enviar-factura"  # Cambia por tu URL real si lo necesitas
         try:
             response = requests.post(url, json=payload)
             st.success(f"Respuesta: {response.text}")
@@ -195,7 +195,7 @@ if st.button("Descargar PDF de esta factura"):
     if not factura_para_pdf or not factura_para_pdf.strip():
         st.warning("Debe ingresar el número de factura para descargar el PDF.")
     else:
-        url = "https://ninox-factory-server.onrender.com/descargar-pdf"
+        url = "http://localhost:8000/descargar-pdf"  # Cambia por tu URL real si lo necesitas
         try:
             response = requests.post(url, json=payload_pdf, stream=True)
             if response.ok and response.headers.get("content-type") == "application/pdf":
