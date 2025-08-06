@@ -2,9 +2,8 @@ import streamlit as st
 import requests
 from datetime import datetime
 import os
-from fpdf import FPDF
 
-# ========== LOGIN ========== #
+# ========== LOGIN ========== 
 USUARIOS = {
     "Mispanama": "Maxilo2000",
     "usuario1": "password123"
@@ -26,7 +25,7 @@ if st.sidebar.button("Cerrar sesión"):
     st.session_state["autenticado"] = False
     st.rerun()
 
-# ========== NINOX API CONFIG ========== #
+# ========== NINOX API CONFIG ==========
 API_TOKEN = "d3c82d50-60d4-11f0-9dd2-0154422825e5"
 TEAM_ID = "6dA5DFvfDTxCQxpDF"
 DATABASE_ID = "yoq1qy9euurq"
@@ -67,7 +66,7 @@ def calcular_siguiente_factura_no(facturas):
             continue
     return f"{max_factura + 1:08d}"
 
-# ========== CARGA DE DATOS ========== #
+# ========== CARGA DE DATOS ==========
 if st.button("Actualizar datos de Ninox"):
     st.session_state.pop("clientes", None)
     st.session_state.pop("productos", None)
@@ -91,7 +90,7 @@ if not productos:
     st.warning("No hay productos en Ninox")
     st.stop()
 
-# ========== SELECCIÓN DE CLIENTE ========== #
+# ========== SELECCIÓN DE CLIENTE ==========
 st.header("Datos del Cliente")
 nombres_clientes = [c['fields']['Nombre'] for c in clientes]
 cliente_idx = st.selectbox("Seleccione Cliente", range(len(nombres_clientes)), format_func=lambda x: nombres_clientes[x])
@@ -106,7 +105,7 @@ with col2:
     st.text_input("Teléfono", value=cliente.get('Teléfono', ''), disabled=True)
     st.text_input("Correo", value=cliente.get('Correo', ''), disabled=True)
 
-# ========== FACTURAS ========== #
+# ========== FACTURAS ==========
 facturas_pendientes = [
     f for f in facturas
     if f["fields"].get("Estado", "").strip().lower() == "pendiente"
@@ -120,7 +119,7 @@ else:
 st.text_input("Factura No.", value=factura_no_preview, disabled=True)
 fecha_emision = st.date_input("Fecha Emisión", value=datetime.today())
 
-# ========== AGREGAR PRODUCTOS ========== #
+# ========== AGREGAR PRODUCTOS ==========
 st.header("Agregar Productos a la Factura")
 if 'items' not in st.session_state:
     st.session_state['items'] = []
@@ -152,7 +151,7 @@ st.write(f"**Total Neto:** {total_neto:.2f}   **ITBMS:** {total_itbms:.2f}   **T
 medio_pago = st.selectbox("Medio de Pago", ["Efectivo", "Débito", "Crédito"])
 emisor = st.text_input("Nombre de quien emite la factura (obligatorio)", value=st.session_state.get("emisor", ""))
 
-# ========== ENVIAR FACTURA ========== #
+# ========== ENVIAR FACTURA ==========
 def obtener_facturas_actualizadas():
     url = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/Facturas/records"
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
@@ -160,6 +159,12 @@ def obtener_facturas_actualizadas():
     if r.ok:
         return r.json()
     return []
+
+# Endpoint de tu backend
+BACKEND_URL = "http://localhost:8000"  # Cambia si usas Render, Railway, etc
+
+pdf_bytes = None
+pdf_name = None
 
 if st.button("Enviar Factura a DGI"):
     if not emisor.strip():
@@ -239,67 +244,59 @@ if st.button("Enviar Factura a DGI"):
                 }
             }
         }
-        url = "https://ninox-factory-server.onrender.com/enviar-factura"  
+        url = BACKEND_URL + "/enviar-factura"
         try:
             response = requests.post(url, json=payload)
-            st.success(f"Respuesta: {response.text}")
-            st.session_state['items'] = []
-            st.session_state["facturas"] = obtener_facturas_actualizadas()
+            if response.ok:
+                st.success(f"Respuesta: {response.text}")
+                st.session_state['items'] = []
+                st.session_state["facturas"] = obtener_facturas_actualizadas()
+                st.session_state["ultima_factura_no"] = factura_no_preview  # Guarda el número para descargar
+            else:
+                st.error("Error al enviar la factura.")
         except Exception as e:
             st.error(f"Error: {str(e)}")
 
-# ========== GENERAR Y DESCARGAR PDF (NO FISCAL) ========== #
-from fpdf import FPDF
-
-def generar_pdf_factura(cliente, items, total, archivo="factura_generada.pdf"):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "Factura Electrónica (No Fiscal)", ln=True, align='C')
-    pdf.set_font("Arial", '', 12)
-    pdf.cell(0, 10, f"Cliente: {cliente.get('Nombre','')}", ln=True)
-    pdf.cell(0, 10, f"RUC: {cliente.get('RUC','')} - {cliente.get('DV','')}", ln=True)
-    pdf.cell(0, 10, f"Dirección: {cliente.get('Dirección','')}", ln=True)
-    pdf.ln(10)
-
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(50, 10, "Producto", 1)
-    pdf.cell(30, 10, "Cantidad", 1)
-    pdf.cell(30, 10, "Precio", 1)
-    pdf.cell(30, 10, "ITBMS", 1)
-    pdf.cell(30, 10, "Total", 1)
-    pdf.ln()
-
-    pdf.set_font("Arial", '', 12)
-    for item in items:
-        pdf.cell(50, 10, item['descripcion'], 1)
-        pdf.cell(30, 10, str(item['cantidad']), 1)
-        pdf.cell(30, 10, f"{item['precioUnitario']:.2f}", 1)
-        pdf.cell(30, 10, f"{item['valorITBMS']:.2f}", 1)
-        subtotal = item['cantidad'] * item['precioUnitario'] + item['valorITBMS']
-        pdf.cell(30, 10, f"{subtotal:.2f}", 1)
-        pdf.ln()
-
-    pdf.ln(5)
-    pdf.cell(0, 10, f"Total a Pagar: {total:.2f}", ln=True, align='R')
-    pdf.cell(0, 10, "NO FISCAL - SOLO USO INTERNO", ln=True, align='L')
-
-    pdf.output(archivo)
-    return archivo
-
+# ========== DESCARGAR PDF ==========
 st.markdown("---")
-st.header("Descargar Pre-Factura PDF (NO FISCAL)")
+st.header("Descargar PDF de la Factura Electrónica")
 
-if st.button("Generar y Descargar PDF Pre-Factura"):
-    archivo_pdf = generar_pdf_factura(cliente, st.session_state['items'], total_factura)
-    with open(archivo_pdf, "rb") as f:
-        st.download_button(
-            label="Descargar PDF generado",
-            data=f,
-            file_name=archivo_pdf,
-            mime="application/pdf"
-        )
-    st.success("PDF generado correctamente, revisa tu carpeta y/o descarga el archivo.")
+factura_para_pdf = st.text_input("Factura No. para PDF", value=st.session_state.get("ultima_factura_no", factura_no_preview))
+
+payload_pdf = {
+    "codigoSucursalEmisor": "0000",
+    "numeroDocumentoFiscal": factura_para_pdf,
+    "puntoFacturacionFiscal": "001",
+    "tipoDocumento": "01",
+    "tipoEmision": "01",
+    "serialDispositivo": ""
+}
+
+if st.button("Descargar PDF de esta factura"):
+    url = BACKEND_URL + "/descargar-pdf"
+    try:
+        with requests.post(url, json=payload_pdf, stream=True) as response:
+            if response.ok and response.headers.get("content-type") == "application/pdf":
+                pdf_bytes = response.content
+                pdf_name = f"Factura_{factura_para_pdf}.pdf"
+                st.download_button(
+                    label="Descargar PDF",
+                    data=pdf_bytes,
+                    file_name=pdf_name,
+                    mime="application/pdf"
+                )
+                st.success("PDF descargado correctamente.")
+            else:
+                st.error("No se pudo descargar el PDF.")
+                try:
+                    error_data = response.json()
+                    st.write(error_data)
+                except Exception:
+                    st.write(response.text)
+    except Exception as e:
+        st.error(f"Error de conexión: {str(e)}")
+
+
 
 
 
