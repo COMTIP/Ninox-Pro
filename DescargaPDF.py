@@ -1,10 +1,10 @@
 import streamlit as st
 import requests
 from datetime import datetime
-from fpdf import FPDF
 import os
+from fpdf import FPDF
 
-# ========== LOGIN ==========
+# ========== LOGIN ========== #
 USUARIOS = {
     "Mispanama": "Maxilo2000",
     "usuario1": "password123"
@@ -26,7 +26,7 @@ if st.sidebar.button("Cerrar sesión"):
     st.session_state["autenticado"] = False
     st.rerun()
 
-# ========== NINOX API CONFIG ==========
+# ========== NINOX API CONFIG ========== #
 API_TOKEN = "d3c82d50-60d4-11f0-9dd2-0154422825e5"
 TEAM_ID = "6dA5DFvfDTxCQxpDF"
 DATABASE_ID = "yoq1qy9euurq"
@@ -67,59 +67,7 @@ def calcular_siguiente_factura_no(facturas):
             continue
     return f"{max_factura + 1:08d}"
 
-# ========== FUNCION PARA GENERAR PDF PRE-FACTURA ==========
-def generar_pdf_fpdf(cliente, numero_factura, fecha_emision, items, subtotal, total_itbms, total):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="Pre-Factura Electrónica (Previo a DGI)", ln=True, align='C')
-    pdf.ln(8)
-    pdf.cell(0, 10, f"Fecha emisión: {fecha_emision.strftime('%d/%m/%Y')}", ln=True)
-    pdf.cell(0, 10, f"Número de Factura: {numero_factura}", ln=True)
-    pdf.cell(0, 10, f"Cliente: {cliente.get('Nombre', '')}", ln=True)
-    pdf.cell(0, 10, f"RUC: {cliente.get('RUC', '')}-{cliente.get('DV', '')}", ln=True)
-    pdf.cell(0, 10, f"Dirección: {cliente.get('Dirección', '')}", ln=True)
-    pdf.cell(0, 10, f"Teléfono: {cliente.get('Teléfono', '')}", ln=True)
-    pdf.cell(0, 10, f"Correo: {cliente.get('Correo', '')}", ln=True)
-    pdf.ln(8)
-
-    # Tabla de ítems
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(10, 8, "#", 1)
-    pdf.cell(30, 8, "Código", 1)
-    pdf.cell(50, 8, "Descripción", 1)
-    pdf.cell(20, 8, "Cant.", 1)
-    pdf.cell(30, 8, "Precio", 1)
-    pdf.cell(20, 8, "ITBMS", 1)
-    pdf.cell(30, 8, "Total", 1)
-    pdf.ln()
-
-    pdf.set_font("Arial", size=12)
-    for idx, item in enumerate(items, 1):
-        pdf.cell(10, 8, str(idx), 1)
-        pdf.cell(30, 8, str(item['codigo']), 1)
-        pdf.cell(50, 8, str(item['descripcion']), 1)
-        pdf.cell(20, 8, f"{item['cantidad']:.2f}", 1)
-        pdf.cell(30, 8, f"{item['precioUnitario']:.2f}", 1)
-        pdf.cell(20, 8, f"{item['valorITBMS']:.2f}", 1)
-        total_item = item['cantidad'] * item['precioUnitario'] + item['valorITBMS']
-        pdf.cell(30, 8, f"{total_item:.2f}", 1)
-        pdf.ln()
-
-    pdf.ln(5)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(40, 8, f"Subtotal: {subtotal:.2f}", ln=True)
-    pdf.cell(40, 8, f"ITBMS: {total_itbms:.2f}", ln=True)
-    pdf.cell(40, 8, f"Total a Pagar: {total:.2f}", ln=True)
-    pdf.ln(5)
-    pdf.set_font("Arial", size=10)
-    pdf.cell(0, 10, txt="NO FISCAL – SOLO USO INTERNO", ln=True, align='L')
-
-    filename = f"PreFactura_{numero_factura}.pdf"
-    pdf.output(filename)
-    return filename
-
-# ========== CARGA DE DATOS ==========
+# ========== CARGA DE DATOS ========== #
 if st.button("Actualizar datos de Ninox"):
     st.session_state.pop("clientes", None)
     st.session_state.pop("productos", None)
@@ -143,7 +91,7 @@ if not productos:
     st.warning("No hay productos en Ninox")
     st.stop()
 
-# ========== SELECCIÓN DE CLIENTE ==========
+# ========== SELECCIÓN DE CLIENTE ========== #
 st.header("Datos del Cliente")
 nombres_clientes = [c['fields']['Nombre'] for c in clientes]
 cliente_idx = st.selectbox("Seleccione Cliente", range(len(nombres_clientes)), format_func=lambda x: nombres_clientes[x])
@@ -158,7 +106,7 @@ with col2:
     st.text_input("Teléfono", value=cliente.get('Teléfono', ''), disabled=True)
     st.text_input("Correo", value=cliente.get('Correo', ''), disabled=True)
 
-# ========== FACTURAS ==========
+# ========== FACTURAS ========== #
 facturas_pendientes = [
     f for f in facturas
     if f["fields"].get("Estado", "").strip().lower() == "pendiente"
@@ -172,7 +120,7 @@ else:
 st.text_input("Factura No.", value=factura_no_preview, disabled=True)
 fecha_emision = st.date_input("Fecha Emisión", value=datetime.today())
 
-# ========== AGREGAR PRODUCTOS ==========
+# ========== AGREGAR PRODUCTOS ========== #
 st.header("Agregar Productos a la Factura")
 if 'items' not in st.session_state:
     st.session_state['items'] = []
@@ -204,31 +152,7 @@ st.write(f"**Total Neto:** {total_neto:.2f}   **ITBMS:** {total_itbms:.2f}   **T
 medio_pago = st.selectbox("Medio de Pago", ["Efectivo", "Débito", "Crédito"])
 emisor = st.text_input("Nombre de quien emite la factura (obligatorio)", value=st.session_state.get("emisor", ""))
 
-# ========== BOTÓN: GENERAR PDF PRE-FACTURA ==========
-st.markdown("---")
-st.subheader("Descargar Pre-Factura PDF (No fiscal)")
-
-if st.button("Generar Pre-Factura PDF"):
-    filename = generar_pdf_fpdf(
-        cliente=cliente,
-        numero_factura=factura_no_preview,
-        fecha_emision=fecha_emision,
-        items=st.session_state['items'],
-        subtotal=total_neto,
-        total_itbms=total_itbms,
-        total=total_factura
-    )
-    with open(filename, "rb") as f:
-        st.download_button(
-            label="Descargar PDF",
-            data=f,
-            file_name=filename,
-            mime="application/pdf"
-        )
-    os.remove(filename)
-    st.success("¡Pre-Factura generada!")
-
-# ========== ENVIAR FACTURA ==========
+# ========== ENVIAR FACTURA ========== #
 def obtener_facturas_actualizadas():
     url = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/Facturas/records"
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
@@ -315,7 +239,7 @@ if st.button("Enviar Factura a DGI"):
                 }
             }
         }
-        url = "https://ninox-factory-server.onrender.com/enviar-factura"
+        url = "https://ninox-factory-server.onrender.com/enviar-factura"  
         try:
             response = requests.post(url, json=payload)
             st.success(f"Respuesta: {response.text}")
@@ -324,55 +248,59 @@ if st.button("Enviar Factura a DGI"):
         except Exception as e:
             st.error(f"Error: {str(e)}")
 
-# ========== DESCARGAR PDF FISCAL DE LA DGI ==========
+# ========== GENERAR Y DESCARGAR PDF (NO FISCAL) ========== #
+from fpdf import FPDF
+
+def generar_pdf_factura(cliente, items, total, archivo="factura_generada.pdf"):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, "Factura Electrónica (No Fiscal)", ln=True, align='C')
+    pdf.set_font("Arial", '', 12)
+    pdf.cell(0, 10, f"Cliente: {cliente.get('Nombre','')}", ln=True)
+    pdf.cell(0, 10, f"RUC: {cliente.get('RUC','')} - {cliente.get('DV','')}", ln=True)
+    pdf.cell(0, 10, f"Dirección: {cliente.get('Dirección','')}", ln=True)
+    pdf.ln(10)
+
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(50, 10, "Producto", 1)
+    pdf.cell(30, 10, "Cantidad", 1)
+    pdf.cell(30, 10, "Precio", 1)
+    pdf.cell(30, 10, "ITBMS", 1)
+    pdf.cell(30, 10, "Total", 1)
+    pdf.ln()
+
+    pdf.set_font("Arial", '', 12)
+    for item in items:
+        pdf.cell(50, 10, item['descripcion'], 1)
+        pdf.cell(30, 10, str(item['cantidad']), 1)
+        pdf.cell(30, 10, f"{item['precioUnitario']:.2f}", 1)
+        pdf.cell(30, 10, f"{item['valorITBMS']:.2f}", 1)
+        subtotal = item['cantidad'] * item['precioUnitario'] + item['valorITBMS']
+        pdf.cell(30, 10, f"{subtotal:.2f}", 1)
+        pdf.ln()
+
+    pdf.ln(5)
+    pdf.cell(0, 10, f"Total a Pagar: {total:.2f}", ln=True, align='R')
+    pdf.cell(0, 10, "NO FISCAL - SOLO USO INTERNO", ln=True, align='L')
+
+    pdf.output(archivo)
+    return archivo
+
 st.markdown("---")
-st.header("Descargar PDF Oficial de la Factura Electrónica (DGI)")
+st.header("Descargar Pre-Factura PDF (NO FISCAL)")
 
-factura_para_pdf = st.text_input("Factura No. para PDF", value=factura_no_preview)
+if st.button("Generar y Descargar PDF Pre-Factura"):
+    archivo_pdf = generar_pdf_factura(cliente, st.session_state['items'], total_factura)
+    with open(archivo_pdf, "rb") as f:
+        st.download_button(
+            label="Descargar PDF generado",
+            data=f,
+            file_name=archivo_pdf,
+            mime="application/pdf"
+        )
+    st.success("PDF generado correctamente, revisa tu carpeta y/o descarga el archivo.")
 
-payload_pdf = {
-    "documento": {
-        "codigoSucursalEmisor": "0000",
-        "numeroDocumentoFiscal": factura_para_pdf,
-        "puntoFacturacionFiscal": "001",
-        "tipoDocumento": "01",
-        "tipoEmision": "01",
-        "serialDispositivo": ""
-    }
-}
-
-if st.button("Descargar PDF de la DGI"):
-    if not factura_para_pdf or not factura_para_pdf.strip():
-        st.warning("Debe ingresar el número de factura para descargar el PDF.")
-    else:
-        url = "https://ninox-factory-server.onrender.com/descargar-pdf"
-        try:
-            response = requests.post(url, json=payload_pdf, stream=True)
-            if response.ok and response.headers.get("content-type") == "application/pdf":
-                file_path = f"Factura_{factura_para_pdf}.pdf"
-                with open(file_path, "wb") as f:
-                    f.write(response.content)
-                with open(file_path, "rb") as f:
-                    st.download_button(
-                        label="Descargar PDF DGI",
-                        data=f,
-                        file_name=file_path,
-                        mime="application/pdf"
-                    )
-                st.success("PDF oficial descargado correctamente.")
-                os.remove(file_path)
-            else:
-                st.error("No se pudo descargar el PDF oficial.")
-                try:
-                    error_data = response.json()
-                    st.write(error_data)
-                    if "detalle_respuesta" in error_data:
-                        detalle = error_data["detalle_respuesta"]
-                        st.error(f"Detalle del servicio: {detalle}")
-                except Exception:
-                    st.write(response.text)
-        except Exception as e:
-            st.error(f"Error de conexión: {str(e)}")
 
 
 
