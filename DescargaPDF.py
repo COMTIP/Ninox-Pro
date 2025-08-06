@@ -3,9 +3,6 @@ import requests
 from datetime import datetime
 import os
 
-st.set_page_config(page_title="Factura Electrónica y Descarga PDF", layout="centered")
-st.title("Factura Electrónica y Descarga PDF")
-
 # ========== LOGIN ==========
 USUARIOS = {
     "Mispanama": "Maxilo2000",
@@ -28,47 +25,115 @@ if st.sidebar.button("Cerrar sesión"):
     st.session_state["autenticado"] = False
     st.rerun()
 
-# ========== DATOS MOCK ==========
-clientes_demo = [
-    {"nombre": "Clínica San Juan", "ruc": "212934-1-397239", "dv": "05", "direccion": "Calle 50, Panamá", "telefono": "61234567", "correo": "info@sanjuan.com"},
-    {"nombre": "Empresa XYZ", "ruc": "180123-1-456789", "dv": "23", "direccion": "Avenida Central", "telefono": "67890123", "correo": "xyz@empresa.com"}
-]
-productos_demo = [
-    {"codigo": "P001", "descripcion": "Implante Dental", "precio_unitario": 200.00, "itbms": 14.00},
-    {"codigo": "P002", "descripcion": "Corona Cerámica", "precio_unitario": 120.00, "itbms": 8.40},
-    {"codigo": "P003", "descripcion": "Prótesis Parcial", "precio_unitario": 80.00, "itbms": 5.60}
-]
+# ========== NINOX API CONFIG ==========
+API_TOKEN = "d3c82d50-60d4-11f0-9dd2-0154422825e5"   # <-- Cambia por tu token real
+TEAM_ID = "6dA5DFvfDTxCQxpDF"
+DATABASE_ID = "yoq1qy9euurq"
+
+def obtener_clientes():
+    url = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/Clientes/records"
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
+    r = requests.get(url, headers=headers)
+    if r.ok:
+        return r.json()
+    return []
+
+def obtener_productos():
+    url = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/Productos/records"
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
+    r = requests.get(url, headers=headers)
+    if r.ok:
+        return r.json()
+    return []
+
+def obtener_facturas():
+    url = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/Facturas/records"
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
+    r = requests.get(url, headers=headers)
+    if r.ok:
+        return r.json()
+    return []
+
+def calcular_siguiente_factura_no(facturas):
+    max_factura = 0
+    for f in facturas:
+        valor = f["fields"].get("Factura No.", "")
+        try:
+            n = int(valor)
+            if n > max_factura:
+                max_factura = n
+        except Exception:
+            continue
+    return f"{max_factura + 1:08d}"
+
+# ========== CARGA DE DATOS ==========
+if st.button("Actualizar datos de Ninox"):
+    st.session_state.pop("clientes", None)
+    st.session_state.pop("productos", None)
+    st.session_state.pop("facturas", None)
+
+if "clientes" not in st.session_state:
+    st.session_state["clientes"] = obtener_clientes()
+if "productos" not in st.session_state:
+    st.session_state["productos"] = obtener_productos()
+if "facturas" not in st.session_state:
+    st.session_state["facturas"] = obtener_facturas()
+
+clientes = st.session_state["clientes"]
+productos = st.session_state["productos"]
+facturas = st.session_state["facturas"]
+
+if not clientes:
+    st.warning("No hay clientes en Ninox")
+    st.stop()
+if not productos:
+    st.warning("No hay productos en Ninox")
+    st.stop()
 
 # ========== SELECCIÓN DE CLIENTE ==========
 st.header("Datos del Cliente")
-nombres_clientes = [c["nombre"] for c in clientes_demo]
+nombres_clientes = [c['fields']['Nombre'] for c in clientes]
 cliente_idx = st.selectbox("Seleccione Cliente", range(len(nombres_clientes)), format_func=lambda x: nombres_clientes[x])
-cliente = clientes_demo[cliente_idx]
+cliente = clientes[cliente_idx]["fields"]
 
 col1, col2 = st.columns(2)
 with col1:
-    st.text_input("RUC", value=cliente["ruc"], disabled=True)
-    st.text_input("DV", value=cliente["dv"], disabled=True)
-    st.text_area("Dirección", value=cliente["direccion"], disabled=True)
+    st.text_input("RUC", value=cliente.get('RUC', ''), disabled=True)
+    st.text_input("DV", value=cliente.get('DV', ''), disabled=True)
+    st.text_area("Dirección", value=cliente.get('Dirección', ''), disabled=True)
 with col2:
-    st.text_input("Teléfono", value=cliente["telefono"], disabled=True)
-    st.text_input("Correo", value=cliente["correo"], disabled=True)
+    st.text_input("Teléfono", value=cliente.get('Teléfono', ''), disabled=True)
+    st.text_input("Correo", value=cliente.get('Correo', ''), disabled=True)
+
+# ========== FACTURAS ==========
+facturas_pendientes = [
+    f for f in facturas
+    if f["fields"].get("Estado", "").strip().lower() == "pendiente"
+]
+if facturas_pendientes:
+    opciones_facturas = [f['fields'].get("Factura No.", "") for f in facturas_pendientes]
+    idx_factura = st.selectbox("Seleccione Factura Pendiente", range(len(opciones_facturas)), format_func=lambda x: opciones_facturas[x])
+    factura_no_preview = opciones_facturas[idx_factura]
+else:
+    factura_no_preview = calcular_siguiente_factura_no(facturas)
+st.text_input("Factura No.", value=factura_no_preview, disabled=True)
+fecha_emision = st.date_input("Fecha Emisión", value=datetime.today())
 
 # ========== AGREGAR PRODUCTOS ==========
 st.header("Agregar Productos a la Factura")
 if 'items' not in st.session_state:
     st.session_state['items'] = []
-nombres_productos = [f"{p['codigo']} | {p['descripcion']}" for p in productos_demo]
+nombres_productos = [f"{p['fields'].get('Código','')} | {p['fields'].get('Descripción','')}" for p in productos]
 prod_idx = st.selectbox("Producto", range(len(nombres_productos)), format_func=lambda x: nombres_productos[x])
-prod_elegido = productos_demo[prod_idx]
+prod_elegido = productos[prod_idx]['fields']
 cantidad = st.number_input("Cantidad", min_value=1.0, value=1.0, step=1.0)
 if st.button("Agregar ítem"):
     st.session_state['items'].append({
-        "codigo": prod_elegido["codigo"],
-        "descripcion": prod_elegido["descripcion"],
+        "codigo": prod_elegido.get('Código', ''),
+        "descripcion": prod_elegido.get('Descripción', ''),
         "cantidad": cantidad,
-        "precioUnitario": float(prod_elegido["precio_unitario"]),
-        "valorITBMS": float(prod_elegido["itbms"]) * cantidad
+        "precioUnitario": float(prod_elegido.get('Precio Unitario', 0)),
+        "valorITBMS": float(prod_elegido.get('ITBMS', 0)) * cantidad
     })
 if st.session_state['items']:
     st.write("#### Ítems de la factura")
@@ -84,10 +149,17 @@ total_factura = total_neto + total_itbms
 st.write(f"**Total Neto:** {total_neto:.2f}   **ITBMS:** {total_itbms:.2f}   **Total a Pagar:** {total_factura:.2f}")
 
 medio_pago = st.selectbox("Medio de Pago", ["Efectivo", "Débito", "Crédito"])
-fecha_emision = st.date_input("Fecha Emisión", value=datetime.today())
 emisor = st.text_input("Nombre de quien emite la factura (obligatorio)", value=st.session_state.get("emisor", ""))
 
 # ========== ENVIAR FACTURA ==========
+def obtener_facturas_actualizadas():
+    url = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/Facturas/records"
+    headers = {"Authorization": f"Bearer {API_TOKEN}"}
+    r = requests.get(url, headers=headers)
+    if r.ok:
+        return r.json()
+    return []
+
 if st.button("Enviar Factura a DGI"):
     if not emisor.strip():
         st.error("Debe ingresar el nombre de quien emite la factura antes de enviarla.")
@@ -105,7 +177,7 @@ if st.button("Enviar Factura a DGI"):
                 "datosTransaccion": {
                     "tipoEmision": "01",
                     "tipoDocumento": "01",
-                    "numeroDocumentoFiscal": "00000001",  # Usa correlativo real en integración
+                    "numeroDocumentoFiscal": factura_no_preview,
                     "puntoFacturacionFiscal": "001",
                     "naturalezaOperacion": "01",
                     "tipoOperacion": 1,
@@ -119,12 +191,12 @@ if st.button("Enviar Factura a DGI"):
                     "cliente": {
                         "tipoClienteFE": "02",
                         "tipoContribuyente": 1,
-                        "numeroRUC": cliente['ruc'].replace("-", ""),
-                        "digitoVerificadorRUC": cliente['dv'],
-                        "razonSocial": cliente['nombre'],
-                        "direccion": cliente['direccion'],
-                        "telefono1": cliente['telefono'],
-                        "correoElectronico1": cliente['correo'],
+                        "numeroRUC": cliente.get('RUC', '').replace("-", ""),
+                        "digitoVerificadorRUC": cliente.get('DV', ''),
+                        "razonSocial": cliente.get('Nombre', ''),
+                        "direccion": cliente.get('Dirección', ''),
+                        "telefono1": cliente.get('Teléfono', ''),
+                        "correoElectronico1": cliente.get('Correo', ''),
                         "pais": "PA"
                     }
                 },
@@ -166,11 +238,12 @@ if st.button("Enviar Factura a DGI"):
                 }
             }
         }
-        url = "http://localhost:8000/enviar-factura"  # Cambia por tu URL real si lo necesitas
+        url = "http://localhost:8000/enviar-factura"   # Cambia por tu URL backend si está en la nube
         try:
             response = requests.post(url, json=payload)
             st.success(f"Respuesta: {response.text}")
             st.session_state['items'] = []
+            st.session_state["facturas"] = obtener_facturas_actualizadas()
         except Exception as e:
             st.error(f"Error: {str(e)}")
 
@@ -178,7 +251,7 @@ if st.button("Enviar Factura a DGI"):
 st.markdown("---")
 st.header("Descargar PDF de la Factura Electrónica")
 
-factura_para_pdf = st.text_input("Factura No. para PDF")
+factura_para_pdf = st.text_input("Factura No. para PDF", value=factura_no_preview)
 
 payload_pdf = {
     "documento": {
@@ -195,7 +268,7 @@ if st.button("Descargar PDF de esta factura"):
     if not factura_para_pdf or not factura_para_pdf.strip():
         st.warning("Debe ingresar el número de factura para descargar el PDF.")
     else:
-        url = "http://localhost:8000/descargar-pdf"  # Cambia por tu URL real si lo necesitas
+        url = "http://localhost:8000/descargar-pdf"   # Cambia por tu URL backend si está en la nube
         try:
             response = requests.post(url, json=payload_pdf, stream=True)
             if response.ok and response.headers.get("content-type") == "application/pdf":
@@ -223,3 +296,5 @@ if st.button("Descargar PDF de esta factura"):
                     st.write(response.text)
         except Exception as e:
             st.error(f"Error de conexión: {str(e)}")
+
+
