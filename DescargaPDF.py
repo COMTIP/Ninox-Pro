@@ -238,7 +238,7 @@ if st.button("Enviar Factura a DGI"):
                 }
             }
         }
-        url = "http://localhost:8000/enviar-factura"   # Cambia por tu URL backend si está en la nube
+        url = "https://ninox-factory-server.onrender.com/enviar-factura"  
         try:
             response = requests.post(url, json=payload)
             st.success(f"Respuesta: {response.text}")
@@ -268,7 +268,7 @@ if st.button("Descargar PDF de esta factura"):
     if not factura_para_pdf or not factura_para_pdf.strip():
         st.warning("Debe ingresar el número de factura para descargar el PDF.")
     else:
-        url = "http://localhost:8000/descargar-pdf"   # Cambia por tu URL backend si está en la nube
+        url = "https://ninox-factory-server.onrender.com/descargar-pdf"   # Cambia por tu URL backend si está en la nube
         try:
             response = requests.post(url, json=payload_pdf, stream=True)
             if response.ok and response.headers.get("content-type") == "application/pdf":
@@ -296,5 +296,6 @@ if st.button("Descargar PDF de esta factura"):
                     st.write(response.text)
         except Exception as e:
             st.error(f"Error de conexión: {str(e)}")
+
 
 
