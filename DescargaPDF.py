@@ -314,7 +314,12 @@ if st.button("Descargar PDF de esta factura"):
         else:
             st.error("No se pudo descargar el PDF.")
             try:
-                st.write(response.json())  # Muestra el error detallado
+                error_data = response.json()
+                st.write(error_data)  # Muestra toda la respuesta
+                # Si el backend trajo el detalle, lo mostramos más amigable
+                if "detalle_respuesta" in error_data:
+                    detalle = error_data["detalle_respuesta"]
+                    st.error(f"Detalle del servicio: {detalle}")
             except Exception:
                 st.write(response.text)
     except Exception as e:
