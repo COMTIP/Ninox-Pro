@@ -3,7 +3,7 @@ import requests
 from datetime import datetime
 import os
 
-# ========== LOGIN ========== 
+# ========== LOGIN ==========
 USUARIOS = {
     "Mispanama": "Maxilo2000",
     "usuario1": "password123"
@@ -160,10 +160,7 @@ def obtener_facturas_actualizadas():
         return r.json()
     return []
 
-# Endpoint de tu backend
-BACKEND_URL = "https://ninox-factory-server.onrender.com/enviar-factura"  
-pdf_bytes = None
-pdf_name = None
+BACKEND_URL = "https://ninox-factory-server.onrender.com"
 
 if st.button("Enviar Factura a DGI"):
     if not emisor.strip():
@@ -250,9 +247,13 @@ if st.button("Enviar Factura a DGI"):
                 st.success(f"Respuesta: {response.text}")
                 st.session_state['items'] = []
                 st.session_state["facturas"] = obtener_facturas_actualizadas()
-                st.session_state["ultima_factura_no"] = factura_no_preview  # Guarda el número para descargar
+                st.session_state["ultima_factura_no"] = factura_no_preview
             else:
                 st.error("Error al enviar la factura.")
+                try:
+                    st.write(response.json())
+                except Exception:
+                    st.write(response.text)
         except Exception as e:
             st.error(f"Error: {str(e)}")
 
@@ -294,6 +295,7 @@ if st.button("Descargar PDF de esta factura"):
                     st.write(response.text)
     except Exception as e:
         st.error(f"Error de conexión: {str(e)}")
+
 
 
 
