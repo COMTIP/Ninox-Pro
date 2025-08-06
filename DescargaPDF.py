@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 from datetime import datetime
-import os
 
 # ========== LOGIN ==========
 USUARIOS = {
@@ -151,7 +150,7 @@ st.write(f"**Total Neto:** {total_neto:.2f}   **ITBMS:** {total_itbms:.2f}   **T
 medio_pago = st.selectbox("Medio de Pago", ["Efectivo", "Débito", "Crédito"])
 emisor = st.text_input("Nombre de quien emite la factura (obligatorio)", value=st.session_state.get("emisor", ""))
 
-# ========== ENVIAR FACTURA ==========
+# ========== ENVIAR Y DESCARGAR PDF ==========
 def obtener_facturas_actualizadas():
     url = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/Facturas/records"
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
@@ -161,6 +160,10 @@ def obtener_facturas_actualizadas():
     return []
 
 BACKEND_URL = "https://ninox-factory-server.onrender.com"
+
+if "pdf_bytes" not in st.session_state:
+    st.session_state["pdf_bytes"] = None
+    st.session_state["pdf_name"] = None
 
 if st.button("Enviar Factura a DGI"):
     if not emisor.strip():
@@ -244,10 +247,34 @@ if st.button("Enviar Factura a DGI"):
         try:
             response = requests.post(url, json=payload)
             if response.ok:
-                st.success(f"Respuesta: {response.text}")
+                st.success(f"Factura enviada correctamente. Generando PDF…")
                 st.session_state['items'] = []
                 st.session_state["facturas"] = obtener_facturas_actualizadas()
                 st.session_state["ultima_factura_no"] = factura_no_preview
+
+                # Intentar descargar el PDF automáticamente
+                pdf_payload = {
+                    "codigoSucursalEmisor": "0000",
+                    "numeroDocumentoFiscal": factura_no_preview,
+                    "puntoFacturacionFiscal": "001",
+                    "tipoDocumento": "01",
+                    "tipoEmision": "01",
+                    "serialDispositivo": ""
+                }
+                pdf_url = BACKEND_URL + "/descargar-pdf"
+                pdf_response = requests.post(pdf_url, json=pdf_payload, stream=True)
+                if pdf_response.ok and pdf_response.headers.get("content-type") == "application/pdf":
+                    st.session_state["pdf_bytes"] = pdf_response.content
+                    st.session_state["pdf_name"] = f"Factura_{factura_no_preview}.pdf"
+                    st.success("¡PDF generado y listo para descargar abajo!")
+                else:
+                    st.session_state["pdf_bytes"] = None
+                    st.session_state["pdf_name"] = None
+                    st.error("Factura enviada, pero no se pudo generar el PDF automáticamente.")
+                    try:
+                        st.write(pdf_response.json())
+                    except Exception:
+                        st.write(pdf_response.text)
             else:
                 st.error("Error al enviar la factura.")
                 try:
@@ -257,44 +284,17 @@ if st.button("Enviar Factura a DGI"):
         except Exception as e:
             st.error(f"Error: {str(e)}")
 
-# ========== DESCARGAR PDF ==========
-st.markdown("---")
-st.header("Descargar PDF de la Factura Electrónica")
+# ========== BOTÓN DE DESCARGA PDF ==========
+if st.session_state.get("pdf_bytes") and st.session_state.get("pdf_name"):
+    st.markdown("---")
+    st.header("Descargar PDF de la Factura Electrónica")
+    st.download_button(
+        label="Descargar PDF",
+        data=st.session_state["pdf_bytes"],
+        file_name=st.session_state["pdf_name"],
+        mime="application/pdf"
+    )
 
-factura_para_pdf = st.text_input("Factura No. para PDF", value=st.session_state.get("ultima_factura_no", factura_no_preview))
-
-payload_pdf = {
-    "codigoSucursalEmisor": "0000",
-    "numeroDocumentoFiscal": factura_para_pdf,
-    "puntoFacturacionFiscal": "001",
-    "tipoDocumento": "01",
-    "tipoEmision": "01",
-    "serialDispositivo": ""
-}
-
-if st.button("Descargar PDF de esta factura"):
-    url = BACKEND_URL + "/descargar-pdf"
-    try:
-        with requests.post(url, json=payload_pdf, stream=True) as response:
-            if response.ok and response.headers.get("content-type") == "application/pdf":
-                pdf_bytes = response.content
-                pdf_name = f"Factura_{factura_para_pdf}.pdf"
-                st.download_button(
-                    label="Descargar PDF",
-                    data=pdf_bytes,
-                    file_name=pdf_name,
-                    mime="application/pdf"
-                )
-                st.success("PDF descargado correctamente.")
-            else:
-                st.error("No se pudo descargar el PDF.")
-                try:
-                    error_data = response.json()
-                    st.write(error_data)
-                except Exception:
-                    st.write(response.text)
-    except Exception as e:
-        st.error(f"Error de conexión: {str(e)}")
 
 
 
