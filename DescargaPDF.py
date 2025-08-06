@@ -161,8 +161,7 @@ def obtener_facturas_actualizadas():
     return []
 
 # Endpoint de tu backend
-BACKEND_URL = "http://localhost:8000"  # Cambia si usas Render, Railway, etc
-
+BACKEND_URL = "https://ninox-factory-server.onrender.com/enviar-factura"  
 pdf_bytes = None
 pdf_name = None
 
@@ -295,6 +294,7 @@ if st.button("Descargar PDF de esta factura"):
                     st.write(response.text)
     except Exception as e:
         st.error(f"Error de conexión: {str(e)}")
+
 
 
 
