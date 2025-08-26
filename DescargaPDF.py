@@ -25,9 +25,9 @@ if st.sidebar.button("Cerrar sesión"):
     st.rerun()
 
 # ========== NINOX API CONFIG ==========
-API_TOKEN = "d3c82d50-60d4-11f0-9dd2-0154422825e5"
-TEAM_ID = "6dA5DFvfDTxCQxpDF"
-DATABASE_ID = "yoq1qy9euurq"
+API_TOKEN = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"
+TEAM_ID = "ihp8o8AaLzfodwc4J"
+DATABASE_ID = "u2g01uaua8tu"
 
 def obtener_clientes():
     url = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/Clientes/records"
@@ -294,6 +294,7 @@ if st.session_state.get("pdf_bytes") and st.session_state.get("pdf_name"):
         file_name=st.session_state["pdf_name"],
         mime="application/pdf"
     )
+
 
 
 
