@@ -1,6 +1,6 @@
 import streamlit as st
 import requests
-from datetime import datetime, date
+from datetime import date
 from typing import List, Dict, Any
 
 # ==========================
@@ -46,7 +46,7 @@ HEADERS  = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application
 # UTILIDADES NINOX
 # ==========================
 def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int = 200) -> List[Dict[str, Any]]:
-    """Descarga todos los registros de una tabla Ninox con paginación simple."""
+    """Descarga todos los registros de una tabla Ninox con paginación."""
     out: List[Dict[str, Any]] = []
     offset = 0
     while True:
@@ -111,6 +111,15 @@ if not productos:
     st.stop()
 
 # ==========================
+# MIGRACIÓN/INICIALIZACIÓN DE ÍTEMS
+# ==========================
+# Evita colisión con el método dict.items()
+if "line_items" not in st.session_state:
+    prev = st.session_state.get("items", [])
+    st.session_state["line_items"] = prev if isinstance(prev, list) else []
+    st.session_state.pop("items", None)
+
+# ==========================
 # SELECCIÓN DE CLIENTE
 # ==========================
 st.header("Datos del Cliente")
@@ -146,10 +155,6 @@ fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 # ÍTEMS
 # ==========================
 st.header("Agregar Productos a la Factura")
-
-# Clave segura para evitar colisión con dict.items()
-if "line_items" not in st.session_state:
-    st.session_state["line_items"] = []
 
 nombres_productos = [
     f"{(p.get('fields', {}) or {}).get('Código','')} | {(p.get('fields', {}) or {}).get('Descripción','')}"
@@ -231,19 +236,19 @@ if st.button("Enviar Factura a DGI"):
         valor_total = precio_item + i["valorITBMS"]
         tasa_itbms  = "01" if (i.get("tasa", 0) or 0) > 0 else "00"
         lista_items.append({
-            "codigo":                 i["codigo"] or "0",
-            "descripcion":            i["descripcion"] or "SIN DESCRIPCIÓN",
-            "codigoGTIN":             "0",
-            "cantidad":               f"{i['cantidad']:.2f}",
-            "precioUnitario":         f"{i['precioUnitario']:.2f}",
-            "precioUnitarioDescuento":"0.00",
-            "precioItem":             f"{precio_item:.2f}",
-            "valorTotal":             f"{valor_total:.2f}",
-            "cantGTINCom":            f"{i['cantidad']:.2f}",
-            "codigoGTINInv":          "0",
-            "tasaITBMS":              tasa_itbms,
-            "valorITBMS":             f"{i['valorITBMS']:.2f}",
-            "cantGTINComInv":         f"{i['cantidad']:.2f}",
+            "codigo":                  i["codigo"] or "0",
+            "descripcion":             i["descripcion"] or "SIN DESCRIPCIÓN",
+            "codigoGTIN":              "0",
+            "cantidad":                f"{i['cantidad']:.2f}",
+            "precioUnitario":          f"{i['precioUnitario']:.2f}",
+            "precioUnitarioDescuento": "0.00",
+            "precioItem":              f"{precio_item:.2f}",
+            "valorTotal":              f"{valor_total:.2f}",
+            "cantGTINCom":             f"{i['cantidad']:.2f}",
+            "codigoGTINInv":           "0",
+            "tasaITBMS":               tasa_itbms,
+            "valorITBMS":              f"{i['valorITBMS']:.2f}",
+            "cantGTINComInv":          f"{i['cantidad']:.2f}",
         })
 
     payload = {
@@ -372,8 +377,6 @@ with st.expander("Ayuda / Referencias"):
         - Zona horaria/CAFE: fija 09:00 -05:00.
         """
     )
-
-
 
 
 
