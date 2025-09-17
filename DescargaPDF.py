@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import re
 from datetime import date
 from typing import List, Dict, Any
 
@@ -70,15 +71,8 @@ def obtener_facturas() -> List[Dict[str, Any]]:
     return _ninox_get("/tables/Facturas/records")
 
 def obtener_lineas_factura() -> List[Dict[str, Any]]:
-    # Ajusta si el nombre real de la tabla difiere
+    # Ajusta si tu tabla se llama distinto
     return _ninox_get("/tables/Lineas%20Factura/records")
-
-def _norm_num(x: Any) -> str:
-    s = str(x).strip()
-    try:
-        return f"{int(s):08d}"
-    except Exception:
-        return s
 
 def calcular_siguiente_factura_no(facts: List[Dict[str, Any]]) -> str:
     max_factura = 0
@@ -86,10 +80,19 @@ def calcular_siguiente_factura_no(facts: List[Dict[str, Any]]) -> str:
         valor = (f.get("fields", {}) or {}).get("Factura No.", "")
         try:
             n = int(str(valor).strip() or 0)
-            max_factura = max(max_factura, n)
+            if n > max_factura:
+                max_factura = n
         except Exception:
             continue
     return f"{max_factura + 1:08d}"
+
+# Normalizador robusto: extrae solo dígitos y completa a 8
+def _norm_num_any(x: Any, width: int = 8) -> str:
+    s = str(x) if x is not None else ""
+    digits = re.sub(r"\D", "", s)
+    if digits == "":
+        return ""
+    return digits.zfill(width)
 
 # ==========================
 # CARGA / REFRESCO DE DATOS
@@ -117,7 +120,7 @@ if not clientes:
 if not productos:
     st.warning("No hay productos en Ninox"); st.stop()
 
-# Índice por código de producto (para ITBMS si falta en la línea)
+# Índice por código de producto (para hallar ITBMS si falta en la línea)
 productos_por_codigo: Dict[str, Dict[str, Any]] = {}
 for p in productos:
     f = p.get("fields", {}) or {}
@@ -156,47 +159,46 @@ def cargar_lineas_factura(factura_id: str, factura_no_norm: str) -> list[dict]:
     """
     Busca líneas que pertenezcan a la factura:
       1) por relación al ID de la factura (campo string o lista)
-      2) respaldo por 'Factura No.'/'Factura' igual al número normalizado (8 dígitos)
+      2) respaldo por cualquier campo cuyo nombre contenga 'factura' y cuyo valor normalizado coincida
     """
-    vistos_ids = set()      # para evitar duplicados cuando matchea por id y por número
+    vistos_ids = set()
     lineas_encontradas: list[Dict[str, Any]] = []
 
     for lf in lineas_factura:
         fields = lf.get("fields", {}) or {}
         match = False
 
-        # 1) Relación por ID (cualquier campo string o lista que contenga el id)
+        # 1) Relación por ID (string o lista que contenga el id)
         for v in fields.values():
             if isinstance(v, str) and v == factura_id:
                 match = True; break
             if isinstance(v, list) and factura_id in v:
                 match = True; break
 
-        # 2) Respaldo por número
+        # 2) Respaldo: por numero en cualquier campo con 'factura' en el nombre
         if not match:
-            for clave in ("Factura No.", "Factura No", "Factura"):
-                if clave in fields:
-                    if _norm_num(fields.get(clave, "")) == factura_no_norm:
+            for k, v in fields.items():
+                k_norm = str(k).lower().replace("\xa0", " ")  # quita NBSP
+                if "factura" in k_norm:
+                    if _norm_num_any(v) == factura_no_norm:
                         match = True
                         break
 
-        if match:
-            if lf.get("id") not in vistos_ids:
-                lineas_encontradas.append(fields)
-                vistos_ids.add(lf.get("id"))
+        if match and lf.get("id") not in vistos_ids:
+            lineas_encontradas.append(fields)
+            vistos_ids.add(lf.get("id"))
 
-    # Mapear al formato interno usado por el payload DGI
+    # Mapear a items internos
     items = []
     for lf in lineas_encontradas:
         codigo = str(lf.get("Código", "")).strip()
         desc   = lf.get("Descripción", "") or lf.get("Descripcion", "") or ""
-
         try:    cant = float(lf.get("Cantidad", 0) or 0)
         except: cant = 0.0
         try:    pu   = float(lf.get("Precio Unitario", 0) or 0)
         except: pu   = 0.0
 
-        # ITBMS: si la línea tiene un número, interpretamos como tasa; si no, buscamos en Productos; si nada, 0
+        # ITBMS: toma tasa de la línea si es numérica; si no, cae a Productos por código; si no, 0
         tasa = None
         if lf.get("ITBMS") is not None:
             try: tasa = float(lf["ITBMS"])
@@ -205,7 +207,6 @@ def cargar_lineas_factura(factura_id: str, factura_no_norm: str) -> list[dict]:
             tasa = float((productos_por_codigo.get(codigo, {}) or {}).get("ITBMS", 0) or 0)
 
         valor_itbms = round((tasa or 0) * cant * pu, 2)
-
         items.append({
             "codigo":         codigo,
             "descripcion":    desc,
@@ -215,7 +216,7 @@ def cargar_lineas_factura(factura_id: str, factura_no_norm: str) -> list[dict]:
             "valorITBMS":     valor_itbms,
         })
 
-    # Guardar información de depuración
+    # Guardar debug
     st.session_state["debug_info"] = {
         "factura_id": factura_id,
         "factura_no_norm": factura_no_norm,
@@ -240,9 +241,8 @@ if facturas_pendientes:
     factura_sel        = facturas_pendientes[idx_factura]
     factura_id         = factura_sel.get("id")
     factura_no_raw     = (factura_sel.get("fields", {}) or {}).get("Factura No.", "")
-    factura_no_preview = _norm_num(factura_no_raw)
+    factura_no_preview = _norm_num_any(factura_no_raw)
 
-    # Carga inicial y botón manual de refresco
     changed = st.session_state.get("factura_seleccionada") != factura_id
     if changed or st.button("Refrescar líneas"):
         st.session_state["factura_seleccionada"] = factura_id
@@ -441,9 +441,9 @@ with st.expander("Depuración (para diagnosticar empates)"):
 with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
-        - Tablas: `Clientes`, `Productos`, `Facturas`, `Lineas Factura`.
-        - Los ítems se cargan **solo** desde `Lineas Factura` por relación **ID** de factura
-          y respaldo por **Factura No.** (8 dígitos).
-        - Si tu campo 'ITBMS' en `Lineas Factura` es **monto** (no tasa), avísame y lo sumo directo.
+        - Ítems cargados **solo** desde `Lineas Factura`.
+        - Coincidencia por **ID de factura** (relación) y respaldo por **número** en cualquier campo que contenga “factura”.
+        - `_norm_num_any` extrae dígitos y normaliza a 8 caracteres (ej. 74 → 00000074).
+        - Si tu campo `ITBMS` en la línea es **monto** (no tasa), avísame y lo sumo directo en lugar de calcular.
         """
     )
