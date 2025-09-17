@@ -71,7 +71,7 @@ def obtener_facturas() -> List[Dict[str, Any]]:
     return _ninox_get("/tables/Facturas/records")
 
 def obtener_lineas_factura() -> List[Dict[str, Any]]:
-    # Ajusta si tu tabla se llama distinto
+    # Asegúrate de que el nombre de la tabla es exactamente este
     return _ninox_get("/tables/Lineas%20Factura/records")
 
 def calcular_siguiente_factura_no(facts: List[Dict[str, Any]]) -> str:
@@ -80,8 +80,7 @@ def calcular_siguiente_factura_no(facts: List[Dict[str, Any]]) -> str:
         valor = (f.get("fields", {}) or {}).get("Factura No.", "")
         try:
             n = int(str(valor).strip() or 0)
-            if n > max_factura:
-                max_factura = n
+            max_factura = max(max_factura, n)
         except Exception:
             continue
     return f"{max_factura + 1:08d}"
@@ -90,7 +89,7 @@ def calcular_siguiente_factura_no(facts: List[Dict[str, Any]]) -> str:
 # Helpers robustos
 # ==========================
 def extract_text(v: Any) -> str:
-    """Convierte cualquier valor Ninox (str, num, dict, list) en texto plano legible."""
+    """Convierte cualquier valor Ninox (str/num/dict/list) a texto legible."""
     if v is None:
         return ""
     if isinstance(v, (int, float)):
@@ -103,7 +102,8 @@ def extract_text(v: Any) -> str:
     if isinstance(v, str):
         return v
     if isinstance(v, dict):
-        for k in ("value", "text", "name", "label", "displayValue"):
+        # campos frecuentes de Ninox
+        for k in ("value", "text", "name", "label", "displayValue", "id"):
             if k in v and v[k] is not None:
                 return str(v[k])
         return str(v)
@@ -112,7 +112,7 @@ def extract_text(v: Any) -> str:
     return str(v)
 
 def _norm_num_any(x: Any, width: int = 8) -> str:
-    """Extrae dígitos de x (que puede ser str/dict/list) y normaliza a 8 dígitos."""
+    """Extrae dígitos y normaliza a 8; tolera 00000074, 74, '00000074 Pendiente', objetos, etc."""
     s = extract_text(x)
     digits = re.sub(r"\D", "", s)
     return digits.zfill(width) if digits else ""
@@ -143,7 +143,7 @@ if not clientes:
 if not productos:
     st.warning("No hay productos en Ninox"); st.stop()
 
-# Índice por código de producto (para hallar ITBMS si falta en la línea)
+# Índice por código de producto
 productos_por_codigo: Dict[str, Dict[str, Any]] = {}
 for p in productos:
     f = p.get("fields", {}) or {}
@@ -180,9 +180,10 @@ with col2:
 # ==========================
 def cargar_lineas_factura(factura_id: str, factura_no_norm: str) -> list[dict]:
     """
-    Busca líneas que pertenezcan a la factura:
-      1) por relación al ID de la factura (campo string o lista)
-      2) por cualquier campo cuyo nombre contenga 'factura' y cuyo valor normalizado coincida
+    Coincidencia por:
+      1) relación directa con ID (string/list/objeto),
+      2) cualquier campo cuyo nombre contenga 'factura' y cuyo valor normalizado coincida,
+      3) y como último recurso: el número aparece en **cualquier** valor de la fila.
     """
     vistos_ids = set()
     lineas_encontradas: list[Dict[str, Any]] = []
@@ -194,27 +195,33 @@ def cargar_lineas_factura(factura_id: str, factura_no_norm: str) -> list[dict]:
         match = False
         razon = ""
 
-        # 1) Relación por ID (string, lista o valor embebido)
+        # 1) Relación por ID
         for k, v in fields.items():
             if isinstance(v, str) and v == factura_id:
                 match, razon = True, f"relación directa en '{k}'"
                 break
             if isinstance(v, list) and factura_id in v:
-                match, razon = True, f"lista relación contiene id en '{k}'"
+                match, razon = True, f"lista contiene id en '{k}'"
                 break
             if isinstance(v, (dict, list)) and factura_id in extract_text(v):
                 match, razon = True, f"relación embebida en '{k}'"
                 break
 
-        # 2) Respaldo por número en cualquier campo con 'factura'
+        # 2) Cualquier campo que contenga 'factura' en el nombre
         if not match:
             for k, v in fields.items():
                 k_norm = str(k).lower().replace("\xa0", " ")
                 if "factura" in k_norm:
-                    v_norm = _norm_num_any(v)  # usa extract_text por dentro
+                    v_norm = _norm_num_any(v)
                     if v_norm == factura_no_norm:
-                        match, razon = True, f"numero coincide en '{k}' => {v_norm}"
+                        match, razon = True, f"número coincide en '{k}' => {v_norm}"
                         break
+
+        # 3) Último recurso: buscar el número en TODO el texto de la fila
+        if not match:
+            row_text = " ".join(extract_text(v) for v in fields.values())
+            if factura_no_norm and factura_no_norm in row_text:
+                match, razon = True, "número encontrado en el texto completo de la fila"
 
         debug_rows.append({
             "row_id": row_id,
@@ -265,7 +272,7 @@ def cargar_lineas_factura(factura_id: str, factura_no_norm: str) -> list[dict]:
         "factura_id": factura_id,
         "factura_no_norm": factura_no_norm,
         "lineas_encontradas": len(lineas_encontradas),
-        "debug_rows": debug_rows[:20],
+        "debug_rows": debug_rows[:30],
     }
     return items
 
@@ -486,9 +493,8 @@ with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
         - Ítems cargados **solo** desde `Lineas Factura`.
-        - Coincidencia por **ID de factura** (relación) y respaldo por **número** en cualquier campo que contenga “factura”.
+        - Coincidencia por **ID** (relación), luego por cualquier campo con “factura”,
+          y como respaldo por el **texto completo** de la fila.
         - `extract_text` y `_norm_num_any` manejan objetos/listas/espacios NBSP y normalizan a 8 dígitos.
-        - Si tu campo `ITBMS` en la línea es **monto** (no tasa), dímelo y lo sumamos directo.
         """
     )
-
