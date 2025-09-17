@@ -8,10 +8,7 @@ from typing import List, Dict, Any
 # ==========================
 st.set_page_config(page_title="Facturación Electrónica — IOM Panamá", layout="centered")
 
-USUARIOS = {
-    "Mispanama": "Maxilo2000",
-    "usuario1": "password123",
-}
+USUARIOS = {"Mispanama": "Maxilo2000", "usuario1": "password123"}
 
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
@@ -46,7 +43,6 @@ HEADERS  = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application
 # UTILIDADES NINOX
 # ==========================
 def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int = 200) -> List[Dict[str, Any]]:
-    """Descarga todos los registros de una tabla Ninox con paginación."""
     out: List[Dict[str, Any]] = []
     offset = 0
     while True:
@@ -74,7 +70,7 @@ def obtener_facturas() -> List[Dict[str, Any]]:
     return _ninox_get("/tables/Facturas/records")
 
 def obtener_lineas_factura() -> List[Dict[str, Any]]:
-    # IMPORTANTE: si tu tabla se llama diferente, ajusta esta ruta
+    # Si el nombre de tu tabla difiere, ajusta esta ruta
     return _ninox_get("/tables/Lineas%20Factura/records")
 
 def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
@@ -111,26 +107,21 @@ facturas       = st.session_state["facturas"]
 lineas_factura = st.session_state["lineas_factura"]
 
 if not clientes:
-    st.warning("No hay clientes en Ninox")
-    st.stop()
+    st.warning("No hay clientes en Ninox"); st.stop()
 if not productos:
-    st.warning("No hay productos en Ninox")
-    st.stop()
+    st.warning("No hay productos en Ninox"); st.stop()
 
-# Índice rápido por código de producto para buscar tasa/precio si falta en la línea
+# Índice por código de producto (para hallar tasa ITBMS si falta en la línea)
 productos_por_codigo: Dict[str, Dict[str, Any]] = {}
 for p in productos:
     f = p.get("fields", {}) or {}
     productos_por_codigo[str(f.get("Código", "")).strip()] = f
 
 # ==========================
-# MIGRACIÓN/INICIALIZACIÓN DE ÍTEMS
+# STATE: ÍTEMS (solo-lectura, vienen de Ninox)
 # ==========================
-# Evita colisión con el método dict.items()
 if "line_items" not in st.session_state:
-    prev = st.session_state.get("items", [])
-    st.session_state["line_items"] = prev if isinstance(prev, list) else []
-    st.session_state.pop("items", None)
+    st.session_state["line_items"] = []
 
 # ==========================
 # SELECCIÓN DE CLIENTE
@@ -159,20 +150,19 @@ if facturas_pendientes:
     idx_factura = st.selectbox("Seleccione Factura Pendiente", range(len(opciones_facturas)), format_func=lambda x: str(opciones_facturas[x]))
     factura_no_preview = str(opciones_facturas[idx_factura])
 
-    # Carga automática de líneas al cambiar la selección
-    if st.session_state.get("factura_seleccionada") != factura_no_preview:
+    # Carga automática (solo-lectura) de líneas al cambiar la selección
+    changed = st.session_state.get("factura_seleccionada") != factura_no_preview
+    if changed or st.button("Refrescar líneas desde Ninox"):
         st.session_state["factura_seleccionada"] = factura_no_preview
 
-        # Normalizamos ambas formas: con ceros a la izquierda y sin ceros
-        seleccionado_raw  = factura_no_preview.strip()
-        seleccionado_int  = None
+        # Normalizar número (con/sin ceros a la izquierda)
+        seleccionado_raw = factura_no_preview.strip()
         try:
             seleccionado_int = int(seleccionado_raw)
         except Exception:
-            pass
+            seleccionado_int = None
 
         def _match_factura_no(ff: Any) -> bool:
-            # ff puede venir como 72, "72", "00000072"
             s = str(ff).strip()
             if s == seleccionado_raw:
                 return True
@@ -190,11 +180,11 @@ if facturas_pendientes:
             if _match_factura_no(fields.get("Factura No.", "")):
                 lineas_de_factura.append(fields)
 
-        # Mapear a nuestro formato interno
+        # Mapear a formato interno (solo-lectura)
         nuevos_items = []
         for lf in lineas_de_factura:
-            codigo   = str(lf.get("Código", "")).strip()
-            desc     = lf.get("Descripción", "") or lf.get("Descripcion", "") or ""
+            codigo = str(lf.get("Código", "")).strip()
+            desc   = lf.get("Descripción", "") or lf.get("Descripcion", "") or ""
             try:
                 cant = float(lf.get("Cantidad", 0) or 0)
             except Exception:
@@ -204,7 +194,7 @@ if facturas_pendientes:
             except Exception:
                 pu = 0.0
 
-            # Intentar obtener tasa ITBMS desde la línea; si no, desde Productos por código; si no, 0
+            # Tasa ITBMS: primero línea, luego Productos por código, si no 0
             tasa_linea = lf.get("ITBMS", None)
             try:
                 tasa = float(tasa_linea) if tasa_linea is not None else None
@@ -213,67 +203,37 @@ if facturas_pendientes:
             if tasa is None:
                 tasa = float((productos_por_codigo.get(codigo, {}) or {}).get("ITBMS", 0) or 0)
 
-            valor_itbms = round(tasa * cant * pu, 2)
+            valor_itbms = round((tasa or 0) * cant * pu, 2)
 
             nuevos_items.append({
                 "codigo":         codigo,
                 "descripcion":    desc,
-                "cantidad":       float(cant),
-                "precioUnitario": float(pu),
+                "cantidad":       cant,
+                "precioUnitario": pu,
                 "tasa":           float(tasa or 0),
-                "valorITBMS":     float(valor_itbms),
+                "valorITBMS":     valor_itbms,
             })
 
         st.session_state["line_items"] = nuevos_items
 
 else:
     factura_no_preview = calcular_siguiente_factura_no(facturas)
+    st.info("No hay facturas pendientes. Este modo solo carga ítems desde 'Lineas Factura'.")
 
 st.text_input("Factura No.", value=factura_no_preview, disabled=True)
 fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 
 # ==========================
-# ÍTEMS (agregar manualmente o auto-cargados)
+# ÍTEMS (SOLO LECTURA)
 # ==========================
-st.header("Agregar Productos a la Factura")
-
-nombres_productos = [
-    f"{(p.get('fields', {}) or {}).get('Código','')} | {(p.get('fields', {}) or {}).get('Descripción','')}"
-    for p in productos
-]
-prod_idx    = st.selectbox("Producto", range(len(nombres_productos)), format_func=lambda x: nombres_productos[x])
-prod_fields = productos[prod_idx].get("fields", {}) or {}
-
-cantidad    = st.number_input("Cantidad", min_value=1.0, value=1.0, step=1.0)
-precio_unit = float(prod_fields.get("Precio Unitario", 0) or 0)
-itbms_rate  = float(prod_fields.get("ITBMS", 0) or 0)   # p.ej. 0.07
-
-if st.button("Agregar ítem"):
-    valor_itbms = round(itbms_rate * cantidad * precio_unit, 2)
-    st.session_state["line_items"].append({
-        "codigo":         prod_fields.get("Código", ""),
-        "descripcion":    prod_fields.get("Descripción", ""),
-        "cantidad":       float(cantidad),
-        "precioUnitario": float(precio_unit),
-        "tasa":           float(itbms_rate),
-        "valorITBMS":     float(valor_itbms),
-    })
-
-if st.session_state["line_items"]:
-    st.write("#### Ítems de la factura")
+st.header("Ítems de la factura (desde 'Lineas Factura')")
+if not st.session_state["line_items"]:
+    st.warning("No se encontraron líneas para la factura seleccionada.")
+else:
     for idx, i in enumerate(st.session_state["line_items"], start=1):
-        st.write(f"{idx}. {i['codigo']} | {i['descripcion']} | Cant: {i['cantidad']:.2f} | P.U.: {i['precioUnitario']:.2f} | ITBMS: {i['valorITBMS']:.2f}")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Limpiar Ítems"):
-            st.session_state["line_items"] = []
-    with c2:
-        idx_del = st.number_input("Eliminar ítem #", min_value=0, value=0, step=1)
-        if st.button("Eliminar"):
-            if 0 < idx_del <= len(st.session_state["line_items"]):
-                st.session_state["line_items"].pop(idx_del - 1)
+        st.write(f"{idx}. {i['codigo']} | {i['descripcion']} | Cant: {i['cantidad']:.2f} | P.U.: {i['precioUnitario']:.2f} | ITBMS calc.: {i['valorITBMS']:.2f}")
 
-# TOTALES
+# TOTALES (calculados)
 total_neto    = sum(i["cantidad"] * i["precioUnitario"] for i in st.session_state["line_items"])
 total_itbms   = sum(i["valorITBMS"] for i in st.session_state["line_items"])
 total_factura = total_neto + total_itbms
@@ -305,12 +265,11 @@ if st.button("Enviar Factura a DGI"):
         st.error("Debe ingresar el nombre de quien emite la factura antes de enviarla.")
         st.stop()
     if not st.session_state["line_items"]:
-        st.error("Debe agregar al menos un producto.")
+        st.error("La factura no tiene líneas en 'Lineas Factura'.")
         st.stop()
 
     forma_pago_codigo = {"Efectivo": "01", "Débito": "02", "Crédito": "03"}[medio_pago]
 
-    # Construcción de ítems payload
     lista_items = []
     for i in st.session_state["line_items"]:
         precio_item = i["cantidad"] * i["precioUnitario"]
@@ -386,7 +345,6 @@ if st.button("Enviar Factura a DGI"):
         }
     }
 
-    # POST al backend — enviar factura
     try:
         url_envio = f"{BACKEND_URL}/enviar-factura"
         r = requests.post(url_envio, json=payload, timeout=60)
@@ -396,7 +354,6 @@ if st.button("Enviar Factura a DGI"):
             _ninox_refrescar_facturas()
             st.session_state["ultima_factura_no"] = str(factura_no_preview)
 
-            # Intento de descarga PDF inmediata
             url_pdf = f"{BACKEND_URL}/descargar-pdf"
             pdf_payload = {
                 "codigoSucursalEmisor":  "0000",
@@ -448,18 +405,8 @@ if st.session_state.get("pdf_bytes") and st.session_state.get("pdf_name"):
 with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
-        - Base Ninox: `Clientes`, `Productos`, `Facturas`, `Lineas Factura`.
-        - Campos esperados (sensibles a mayúsculas):
-          - **Clientes**: Nombre, RUC, DV, Dirección, Teléfono, Correo
-          - **Productos**: Código, Descripción, Precio Unitario, ITBMS (decimal; ej. 0.07)
-          - **Facturas**: Estado (use "Pendiente" para listar aquí), "Factura No." (numérico consecutivo)
-          - **Lineas Factura**: Factura No., Código, Descripción, Cantidad, Precio Unitario, ITBMS (opcional)
-        - Seleccionar una **Factura Pendiente** carga automáticamente sus ítems.
+        - Tablas Ninox usadas: `Clientes`, `Productos`, `Facturas`, `Lineas Factura`.
+        - **No** se permite agregar ítems manualmente; se cargan desde `Lineas Factura`.
+        - Campos esperados en `Lineas Factura`: Factura No., Código, Descripción, Cantidad, Precio Unitario, ITBMS (opcional, tasa).
         """
     )
-
-
-
-
-
-
