@@ -35,7 +35,7 @@ if st.sidebar.button("Cerrar sesión"):
 # ==========================
 # NINOX API CONFIG
 # ==========================
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"
+API_TOKEN   = "03035f50-93e2-11f0-883e-db77626d62e5"
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "u2g01uaua8tu"
 
@@ -377,6 +377,7 @@ with st.expander("Ayuda / Referencias"):
         - Zona horaria/CAFE: fija 09:00 -05:00.
         """
     )
+
 
 
 
