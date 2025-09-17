@@ -36,8 +36,8 @@ if st.sidebar.button("Cerrar sesión"):
 # NINOX API CONFIG
 # ==========================
 API_TOKEN   = "03035f50-93e2-11f0-883e-db77626d62e5"
-TEAM_ID     = "ihp8o8AaLzfodwc4J"
-DATABASE_ID = "u2g01uaua8tu"
+TEAM_ID     = "fhmgaLpFghyh5sNHh"
+DATABASE_ID = "er0sibgl3dug"
 
 BASE_URL = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}"
 HEADERS  = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
@@ -377,6 +377,7 @@ with st.expander("Ayuda / Referencias"):
         - Zona horaria/CAFE: fija 09:00 -05:00.
         """
     )
+
 
 
 
