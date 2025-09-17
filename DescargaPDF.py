@@ -73,6 +73,10 @@ def obtener_productos() -> List[Dict[str, Any]]:
 def obtener_facturas() -> List[Dict[str, Any]]:
     return _ninox_get("/tables/Facturas/records")
 
+def obtener_lineas_factura() -> List[Dict[str, Any]]:
+    # IMPORTANTE: si tu tabla se llama diferente, ajusta esta ruta
+    return _ninox_get("/tables/Lineas%20Factura/records")
+
 def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
     max_factura = 0
     for f in facturas:
@@ -89,7 +93,7 @@ def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
 # CARGA / REFRESCO DE DATOS
 # ==========================
 if st.button("Actualizar datos de Ninox"):
-    for k in ("clientes", "productos", "facturas"):
+    for k in ("clientes", "productos", "facturas", "lineas_factura"):
         st.session_state.pop(k, None)
 
 if "clientes" not in st.session_state:
@@ -98,10 +102,13 @@ if "productos" not in st.session_state:
     st.session_state["productos"] = obtener_productos()
 if "facturas" not in st.session_state:
     st.session_state["facturas"] = obtener_facturas()
+if "lineas_factura" not in st.session_state:
+    st.session_state["lineas_factura"] = obtener_lineas_factura()
 
-clientes  = st.session_state["clientes"]
-productos = st.session_state["productos"]
-facturas  = st.session_state["facturas"]
+clientes       = st.session_state["clientes"]
+productos      = st.session_state["productos"]
+facturas       = st.session_state["facturas"]
+lineas_factura = st.session_state["lineas_factura"]
 
 if not clientes:
     st.warning("No hay clientes en Ninox")
@@ -109,6 +116,12 @@ if not clientes:
 if not productos:
     st.warning("No hay productos en Ninox")
     st.stop()
+
+# Índice rápido por código de producto para buscar tasa/precio si falta en la línea
+productos_por_codigo: Dict[str, Dict[str, Any]] = {}
+for p in productos:
+    f = p.get("fields", {}) or {}
+    productos_por_codigo[str(f.get("Código", "")).strip()] = f
 
 # ==========================
 # MIGRACIÓN/INICIALIZACIÓN DE ÍTEMS
@@ -145,6 +158,74 @@ if facturas_pendientes:
     opciones_facturas = [(f.get("fields", {}) or {}).get("Factura No.", "") for f in facturas_pendientes]
     idx_factura = st.selectbox("Seleccione Factura Pendiente", range(len(opciones_facturas)), format_func=lambda x: str(opciones_facturas[x]))
     factura_no_preview = str(opciones_facturas[idx_factura])
+
+    # Carga automática de líneas al cambiar la selección
+    if st.session_state.get("factura_seleccionada") != factura_no_preview:
+        st.session_state["factura_seleccionada"] = factura_no_preview
+
+        # Normalizamos ambas formas: con ceros a la izquierda y sin ceros
+        seleccionado_raw  = factura_no_preview.strip()
+        seleccionado_int  = None
+        try:
+            seleccionado_int = int(seleccionado_raw)
+        except Exception:
+            pass
+
+        def _match_factura_no(ff: Any) -> bool:
+            # ff puede venir como 72, "72", "00000072"
+            s = str(ff).strip()
+            if s == seleccionado_raw:
+                return True
+            if seleccionado_int is not None:
+                try:
+                    return int(s) == seleccionado_int
+                except Exception:
+                    return False
+            return False
+
+        # Filtrar líneas de esa factura
+        lineas_de_factura = []
+        for lf in lineas_factura:
+            fields = lf.get("fields", {}) or {}
+            if _match_factura_no(fields.get("Factura No.", "")):
+                lineas_de_factura.append(fields)
+
+        # Mapear a nuestro formato interno
+        nuevos_items = []
+        for lf in lineas_de_factura:
+            codigo   = str(lf.get("Código", "")).strip()
+            desc     = lf.get("Descripción", "") or lf.get("Descripcion", "") or ""
+            try:
+                cant = float(lf.get("Cantidad", 0) or 0)
+            except Exception:
+                cant = 0.0
+            try:
+                pu = float(lf.get("Precio Unitario", 0) or 0)
+            except Exception:
+                pu = 0.0
+
+            # Intentar obtener tasa ITBMS desde la línea; si no, desde Productos por código; si no, 0
+            tasa_linea = lf.get("ITBMS", None)
+            try:
+                tasa = float(tasa_linea) if tasa_linea is not None else None
+            except Exception:
+                tasa = None
+            if tasa is None:
+                tasa = float((productos_por_codigo.get(codigo, {}) or {}).get("ITBMS", 0) or 0)
+
+            valor_itbms = round(tasa * cant * pu, 2)
+
+            nuevos_items.append({
+                "codigo":         codigo,
+                "descripcion":    desc,
+                "cantidad":       float(cant),
+                "precioUnitario": float(pu),
+                "tasa":           float(tasa or 0),
+                "valorITBMS":     float(valor_itbms),
+            })
+
+        st.session_state["line_items"] = nuevos_items
+
 else:
     factura_no_preview = calcular_siguiente_factura_no(facturas)
 
@@ -152,7 +233,7 @@ st.text_input("Factura No.", value=factura_no_preview, disabled=True)
 fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 
 # ==========================
-# ÍTEMS
+# ÍTEMS (agregar manualmente o auto-cargados)
 # ==========================
 st.header("Agregar Productos a la Factura")
 
@@ -367,18 +448,15 @@ if st.session_state.get("pdf_bytes") and st.session_state.get("pdf_name"):
 with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
-        - Base Ninox: `Clientes`, `Productos`, `Facturas`.
+        - Base Ninox: `Clientes`, `Productos`, `Facturas`, `Lineas Factura`.
         - Campos esperados (sensibles a mayúsculas):
           - **Clientes**: Nombre, RUC, DV, Dirección, Teléfono, Correo
           - **Productos**: Código, Descripción, Precio Unitario, ITBMS (decimal; ej. 0.07)
           - **Facturas**: Estado (use "Pendiente" para listar aquí), "Factura No." (numérico consecutivo)
-        - Si no hay facturas pendientes, el número se calcula como el mayor `Factura No.` + 1 (8 dígitos).
-        - Envío a DGI vía backend: `/enviar-factura` y `/descargar-pdf`.
-        - Zona horaria/CAFE: fija 09:00 -05:00.
+          - **Lineas Factura**: Factura No., Código, Descripción, Cantidad, Precio Unitario, ITBMS (opcional)
+        - Seleccionar una **Factura Pendiente** carga automáticamente sus ítems.
         """
     )
-
-
 
 
 
