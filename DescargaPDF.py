@@ -86,13 +86,36 @@ def calcular_siguiente_factura_no(facts: List[Dict[str, Any]]) -> str:
             continue
     return f"{max_factura + 1:08d}"
 
-# Normalizador robusto: extrae solo dígitos y completa a 8
-def _norm_num_any(x: Any, width: int = 8) -> str:
-    s = str(x) if x is not None else ""
-    digits = re.sub(r"\D", "", s)
-    if digits == "":
+# ==========================
+# Helpers robustos
+# ==========================
+def extract_text(v: Any) -> str:
+    """Convierte cualquier valor Ninox (str, num, dict, list) en texto plano legible."""
+    if v is None:
         return ""
-    return digits.zfill(width)
+    if isinstance(v, (int, float)):
+        try:
+            if float(v).is_integer():
+                return str(int(v))
+        except Exception:
+            pass
+        return str(v)
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        for k in ("value", "text", "name", "label", "displayValue"):
+            if k in v and v[k] is not None:
+                return str(v[k])
+        return str(v)
+    if isinstance(v, list):
+        return " ".join(extract_text(x) for x in v)
+    return str(v)
+
+def _norm_num_any(x: Any, width: int = 8) -> str:
+    """Extrae dígitos de x (que puede ser str/dict/list) y normaliza a 8 dígitos."""
+    s = extract_text(x)
+    digits = re.sub(r"\D", "", s)
+    return digits.zfill(width) if digits else ""
 
 # ==========================
 # CARGA / REFRESCO DE DATOS
@@ -124,7 +147,7 @@ if not productos:
 productos_por_codigo: Dict[str, Dict[str, Any]] = {}
 for p in productos:
     f = p.get("fields", {}) or {}
-    productos_por_codigo[str(f.get("Código", "")).strip()] = f
+    productos_por_codigo[str(extract_text(f.get("Código", ""))).strip()] = f
 
 # ==========================
 # STATE
@@ -139,18 +162,18 @@ if "debug_info" not in st.session_state:
 # ==========================
 st.header("Datos del Cliente")
 
-nombres_clientes = [c.get("fields", {}).get("Nombre", f"Cliente {i}") for i, c in enumerate(clientes, start=1)]
-cliente_idx = st.selectbox("Seleccione Cliente", range(len(nombres_clientes)), format_func=lambda x: nombres_clientes[x])
+nombres_clientes = [ (c.get("fields", {}) or {}).get("Nombre", f"Cliente {i}") for i, c in enumerate(clientes, start=1) ]
+cliente_idx = st.selectbox("Seleccione Cliente", range(len(nombres_clientes)), format_func=lambda x: extract_text(nombres_clientes[x]))
 cliente_fields: Dict[str, Any] = clientes[cliente_idx].get("fields", {}) or {}
 
 col1, col2 = st.columns(2)
 with col1:
-    st.text_input("RUC",       value=cliente_fields.get("RUC", ""),        disabled=True)
-    st.text_input("DV",        value=cliente_fields.get("DV", ""),         disabled=True)
-    st.text_area ("Dirección", value=cliente_fields.get("Dirección", ""),  disabled=True)
+    st.text_input("RUC",       value=extract_text(cliente_fields.get("RUC", "")),        disabled=True)
+    st.text_input("DV",        value=extract_text(cliente_fields.get("DV", "")),         disabled=True)
+    st.text_area ("Dirección", value=extract_text(cliente_fields.get("Dirección", "")),  disabled=True)
 with col2:
-    st.text_input("Teléfono",  value=cliente_fields.get("Teléfono", ""),   disabled=True)
-    st.text_input("Correo",    value=cliente_fields.get("Correo", ""),     disabled=True)
+    st.text_input("Teléfono",  value=extract_text(cliente_fields.get("Teléfono", "")),   disabled=True)
+    st.text_input("Correo",    value=extract_text(cliente_fields.get("Correo", "")),     disabled=True)
 
 # ==========================
 # FUNC: Cargar líneas desde Lineas Factura
@@ -159,50 +182,71 @@ def cargar_lineas_factura(factura_id: str, factura_no_norm: str) -> list[dict]:
     """
     Busca líneas que pertenezcan a la factura:
       1) por relación al ID de la factura (campo string o lista)
-      2) respaldo por cualquier campo cuyo nombre contenga 'factura' y cuyo valor normalizado coincida
+      2) por cualquier campo cuyo nombre contenga 'factura' y cuyo valor normalizado coincida
     """
     vistos_ids = set()
     lineas_encontradas: list[Dict[str, Any]] = []
+    debug_rows = []
 
     for lf in lineas_factura:
         fields = lf.get("fields", {}) or {}
+        row_id = lf.get("id")
         match = False
+        razon = ""
 
-        # 1) Relación por ID (string o lista que contenga el id)
-        for v in fields.values():
+        # 1) Relación por ID (string, lista o valor embebido)
+        for k, v in fields.items():
             if isinstance(v, str) and v == factura_id:
-                match = True; break
+                match, razon = True, f"relación directa en '{k}'"
+                break
             if isinstance(v, list) and factura_id in v:
-                match = True; break
+                match, razon = True, f"lista relación contiene id en '{k}'"
+                break
+            if isinstance(v, (dict, list)) and factura_id in extract_text(v):
+                match, razon = True, f"relación embebida en '{k}'"
+                break
 
-        # 2) Respaldo: por numero en cualquier campo con 'factura' en el nombre
+        # 2) Respaldo por número en cualquier campo con 'factura'
         if not match:
             for k, v in fields.items():
-                k_norm = str(k).lower().replace("\xa0", " ")  # quita NBSP
+                k_norm = str(k).lower().replace("\xa0", " ")
                 if "factura" in k_norm:
-                    if _norm_num_any(v) == factura_no_norm:
-                        match = True
+                    v_norm = _norm_num_any(v)  # usa extract_text por dentro
+                    if v_norm == factura_no_norm:
+                        match, razon = True, f"numero coincide en '{k}' => {v_norm}"
                         break
 
-        if match and lf.get("id") not in vistos_ids:
+        debug_rows.append({
+            "row_id": row_id,
+            "match": match,
+            "razon": razon,
+            "campos_factura_detectados": {
+                k: {"valor": extract_text(v), "norm": _norm_num_any(v)}
+                for k, v in fields.items()
+                if "factura" in str(k).lower().replace("\xa0", " ")
+            }
+        })
+
+        if match and row_id not in vistos_ids:
             lineas_encontradas.append(fields)
-            vistos_ids.add(lf.get("id"))
+            vistos_ids.add(row_id)
 
     # Mapear a items internos
     items = []
     for lf in lineas_encontradas:
-        codigo = str(lf.get("Código", "")).strip()
-        desc   = lf.get("Descripción", "") or lf.get("Descripcion", "") or ""
-        try:    cant = float(lf.get("Cantidad", 0) or 0)
+        codigo = extract_text(lf.get("Código", "")).strip()
+        desc   = extract_text(lf.get("Descripción", "") or lf.get("Descripcion", "")).strip()
+        try:    cant = float(extract_text(lf.get("Cantidad", 0)) or 0)
         except: cant = 0.0
-        try:    pu   = float(lf.get("Precio Unitario", 0) or 0)
+        try:    pu   = float(extract_text(lf.get("Precio Unitario", 0)) or 0)
         except: pu   = 0.0
 
-        # ITBMS: toma tasa de la línea si es numérica; si no, cae a Productos por código; si no, 0
+        # ITBMS: tasa en línea -> producto por código -> 0
         tasa = None
-        if lf.get("ITBMS") is not None:
-            try: tasa = float(lf["ITBMS"])
-            except Exception: tasa = None
+        v_itbms = lf.get("ITBMS")
+        if v_itbms is not None:
+            try: tasa = float(extract_text(v_itbms))
+            except: tasa = None
         if tasa is None:
             tasa = float((productos_por_codigo.get(codigo, {}) or {}).get("ITBMS", 0) or 0)
 
@@ -221,7 +265,7 @@ def cargar_lineas_factura(factura_id: str, factura_no_norm: str) -> list[dict]:
         "factura_id": factura_id,
         "factura_no_norm": factura_no_norm,
         "lineas_encontradas": len(lineas_encontradas),
-        "ejemplo_linea": (lineas_encontradas[0] if lineas_encontradas else {}),
+        "debug_rows": debug_rows[:20],
     }
     return items
 
@@ -234,9 +278,9 @@ facturas_pendientes = [
 ]
 
 if facturas_pendientes:
-    opciones_facturas = [(f.get("fields", {}) or {}).get("Factura No.", "") for f in facturas_pendientes]
+    opciones_facturas = [ (f.get("fields", {}) or {}).get("Factura No.", "") for f in facturas_pendientes ]
     idx_factura = st.selectbox("Seleccione Factura Pendiente", range(len(opciones_facturas)),
-                               format_func=lambda x: str(opciones_facturas[x]))
+                               format_func=lambda x: extract_text(opciones_facturas[x]))
 
     factura_sel        = facturas_pendientes[idx_factura]
     factura_id         = factura_sel.get("id")
@@ -342,12 +386,12 @@ if st.button("Enviar Factura a DGI"):
                 "cliente": {
                     "tipoClienteFE": "02",
                     "tipoContribuyente": 1,
-                    "numeroRUC": (cliente_fields.get("RUC", "") or "").replace("-", ""),
-                    "digitoVerificadorRUC": cliente_fields.get("DV", ""),
-                    "razonSocial": cliente_fields.get("Nombre", ""),
-                    "direccion": cliente_fields.get("Dirección", ""),
-                    "telefono1": cliente_fields.get("Teléfono", ""),
-                    "correoElectronico1": cliente_fields.get("Correo", ""),
+                    "numeroRUC": (extract_text(cliente_fields.get("RUC", "")) or "").replace("-", ""),
+                    "digitoVerificadorRUC": extract_text(cliente_fields.get("DV", "")),
+                    "razonSocial": extract_text(cliente_fields.get("Nombre", "")),
+                    "direccion": extract_text(cliente_fields.get("Dirección", "")),
+                    "telefono1": extract_text(cliente_fields.get("Teléfono", "")),
+                    "correoElectronico1": extract_text(cliente_fields.get("Correo", "")),
                     "pais": "PA",
                 },
             },
@@ -443,7 +487,8 @@ with st.expander("Ayuda / Referencias"):
         """
         - Ítems cargados **solo** desde `Lineas Factura`.
         - Coincidencia por **ID de factura** (relación) y respaldo por **número** en cualquier campo que contenga “factura”.
-        - `_norm_num_any` extrae dígitos y normaliza a 8 caracteres (ej. 74 → 00000074).
-        - Si tu campo `ITBMS` en la línea es **monto** (no tasa), avísame y lo sumo directo en lugar de calcular.
+        - `extract_text` y `_norm_num_any` manejan objetos/listas/espacios NBSP y normalizan a 8 dígitos.
+        - Si tu campo `ITBMS` en la línea es **monto** (no tasa), dímelo y lo sumamos directo.
         """
     )
+
