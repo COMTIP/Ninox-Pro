@@ -77,10 +77,10 @@ def calcular_siguiente_factura_no(facts: List[Dict[str, Any]]) -> str:
     return f"{max_factura + 1:08d}"
 
 # ==========================
-# HELPERS ROBUSTOS
+# HELPERS
 # ==========================
 def extract_text(v: Any) -> str:
-    """Convierte cualquier valor Ninox (str/num/dict/list) a texto legible."""
+    """Convierte cualquier valor Ninox (str/num/dict/list) a texto."""
     if v is None: return ""
     if isinstance(v, (int, float)):
         try:
@@ -99,7 +99,7 @@ def extract_text(v: Any) -> str:
     return str(v)
 
 def norm8(x: Any) -> str:
-    """Extrae dígitos y normaliza a 8 (74 -> 00000074; '00000074 Pendiente' -> 00000074)."""
+    """Extrae dígitos y normaliza a 8 (74 -> 00000074)."""
     s = extract_text(x)
     d = re.sub(r"\D", "", s)
     return d.zfill(8) if d else ""
@@ -129,7 +129,7 @@ lineas_factura = st.session_state["lineas_factura"]
 if not clientes:  st.warning("No hay clientes en Ninox");  st.stop()
 if not productos: st.warning("No hay productos en Ninox"); st.stop()
 
-# Índice de productos por código (por si quieres leer tasa ITBMS desde Productos cuando falte en la línea)
+# Índice de productos por código (para usar tasa de producto si la línea no trae tasa)
 productos_por_codigo: Dict[str, Dict[str, Any]] = {}
 for p in productos:
     f = p.get("fields", {}) or {}
@@ -139,6 +139,7 @@ for p in productos:
 # STATE
 # ==========================
 if "line_items" not in st.session_state: st.session_state["line_items"] = []
+if "factura_seleccionada" not in st.session_state: st.session_state["factura_seleccionada"] = None
 
 # ==========================
 # FUNCIÓN: TRAER LÍNEAS DESDE "LINEAS FACTURA" POR NÚMERO
@@ -147,10 +148,11 @@ def traer_lineas_factura_por_numero(n_factura_8d: str) -> list[dict]:
     """Devuelve items a partir de la tabla 'Lineas Factura' para el número dado (8 dígitos)."""
     items = []
     posibles = {"Factura No.", "Factura No", "Factura", "N° Factura", "Nº Factura"}
-    for r in lineas_factura:
+
+    for r in st.session_state.get("lineas_factura") or []:
         f = (r.get("fields") or {})
 
-        # 1) intentar leer el número desde cualquier campo que contenga 'factura'
+        # 1) leer el número desde cualquier campo que contenga 'factura'
         num_detectado = ""
         for k, v in f.items():
             if "factura" in str(k).lower().replace("\xa0", " "):
@@ -164,28 +166,24 @@ def traer_lineas_factura_por_numero(n_factura_8d: str) -> list[dict]:
                     num_detectado = norm8(f.get(k))
                     if num_detectado: break
 
-        # 3) si coincide, mapear la línea a nuestro formato
         if num_detectado == n_factura_8d:
             codigo = str(extract_text(f.get("Código", ""))).strip()
             desc   = extract_text(f.get("Descripción", "") or f.get("Descripcion", "")).strip()
             cant   = to_float(f.get("Cantidad", 0))
             pu     = to_float(f.get("Precio Unitario", 0))
+            itbms  = to_float(f.get("ITBMS", 0))
 
-            itbms_raw = f.get("ITBMS", 0)
-            itbms_num = to_float(itbms_raw)
-
-            # Heurística: si ITBMS <= 1.5 lo tomamos como TASA; si > 1.5 lo tomamos como MONTO de ITBMS
-            if itbms_num <= 1.5:
-                tasa = itbms_num
+            # Heurística: <=1.5 se interpreta como TASA; >1.5 como MONTO de ITBMS
+            if itbms <= 1.5:
+                tasa = itbms
                 valor_itbms = round(tasa * cant * pu, 2)
             else:
-                # es monto
-                valor_itbms = itbms_num
+                valor_itbms = itbms
                 base = cant * pu
                 tasa = round(valor_itbms / base, 4) if base > 0 else 0.0
 
-            # respaldo: si tasa sigue en 0 intentar desde Productos
-            if tasa == 0.0 and codigo in productos_por_codigo:
+            # Respaldo: si tasa == 0 intentar traer tasa del producto
+            if (tasa == 0.0) and codigo in productos_por_codigo:
                 try:
                     tasa = float(productos_por_codigo[codigo].get("ITBMS", 0) or 0)
                     valor_itbms = round(tasa * cant * pu, 2)
@@ -201,6 +199,9 @@ def traer_lineas_factura_por_numero(n_factura_8d: str) -> list[dict]:
                 "valorITBMS":     float(valor_itbms),
             })
     return items
+
+def refrescar_lineas_factura():
+    st.session_state["lineas_factura"] = obtener_lineas_factura()
 
 # ==========================
 # UI: DATOS DEL CLIENTE
@@ -220,7 +221,7 @@ with col2:
     st.text_input("Correo",    value=extract_text(cliente_fields.get("Correo", "")),     disabled=True)
 
 # ==========================
-# FACTURA PENDIENTE -> CARGAR ÍTEMS DESDE LINEAS FACTURA
+# FACTURA PENDIENTE -> CARGAR ÍTEMS DESDE LINEAS FACTURA (con refresco)
 # ==========================
 facturas_pendientes = [
     f for f in facturas
@@ -233,10 +234,18 @@ if facturas_pendientes:
         "Seleccione Factura Pendiente",
         range(len(opciones_facturas)),
         format_func=lambda x: str(opciones_facturas[x]),
+        key="select_factura_pend"
     )
+
     factura_sel        = facturas_pendientes[idx_factura]
+    factura_id         = factura_sel.get("id")
     factura_no_raw     = (factura_sel.get("fields", {}) or {}).get("Factura No.", "")
     factura_no_preview = norm8(factura_no_raw)
+
+    # Refrescar líneas al cambiar la selección para evitar datos viejos
+    if st.session_state.get("factura_seleccionada") != factura_id:
+        st.session_state["factura_seleccionada"] = factura_id
+        refrescar_lineas_factura()
 
     # Cargar SIEMPRE desde la tabla Lineas Factura
     st.session_state["line_items"] = traer_lineas_factura_por_numero(factura_no_preview)
@@ -409,19 +418,22 @@ if st.session_state.get("pdf_bytes") and st.session_state.get("pdf_name"):
     )
 
 # ==========================
-# DEBUG OPCIONAL
+# DIAGNÓSTICO (para ver qué devuelve la tabla)
 # ==========================
-with st.expander("DEBUG Lineas Factura"):
-    vista = []
-    for r in lineas_factura[:15]:
-        f = r.get("fields", {}) or {}
-        any_fact = ""
-        for k, v in f.items():
-            if "factura" in str(k).lower().replace("\xa0", " "):
-                any_fact = norm8(v); break
-        vista.append({
-            "id": r.get("id"),
-            "Factura detectada": any_fact,
-            "campos ejemplo": list(f.keys())[:8],
-        })
-    st.write(vista)
+with st.expander("Diagnóstico Lineas Factura"):
+    lineas = st.session_state.get("lineas_factura") or []
+    st.write({
+        "factura_no_preview": factura_no_preview,
+        "total_lineas_cargadas": len(lineas),
+        "primeras_5_lineas_detectadas": [
+            {
+                "id": r.get("id"),
+                "Factura_No_detectado": norm8(
+                    next((v for k, v in (r.get("fields") or {}).items()
+                          if "factura" in k.lower().replace("\xa0"," ")), "")
+                ),
+                "claves": list((r.get("fields") or {}).keys())[:10]
+            } for r in lineas[:5]
+        ]
+    })
+
