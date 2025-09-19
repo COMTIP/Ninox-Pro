@@ -61,19 +61,17 @@ def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int =
         offset += page_size
     return out
 
-_num_keep = re.compile(r"[^0-9\-,\.]")  # elimina todo lo que NO sea dígito, coma, punto o signo -
+_num_keep = re.compile(r"[^0-9\-,\.]")  # quita $, espacios, etc.
 def as_float(v: Union[str, int, float, None]) -> float:
-    """Convierte valores tipo '48,00', '$25,50', '1.234,56'."""
+    """Convierte '48,00', '$25,50', '1.234,56' -> float."""
     if v is None:
         return 0.0
     if isinstance(v, (int, float)):
         return float(v)
-    s = str(v).strip()
+    s = _num_keep.sub("", str(v).strip())
     if s == "":
         return 0.0
-    s = _num_keep.sub("", s)  # quita $ y otros símbolos
-    # si hay coma decimal única, convertir a punto y eliminar separadores de miles
-    if s.count(",") == 1 and (s.rfind(",") > s.rfind(".")):
+    if s.count(",") == 1 and s.rfind(",") > s.rfind("."):
         s = s.replace(".", "").replace(",", ".")
     try:
         return float(s)
@@ -93,7 +91,7 @@ def obtener_facturas() -> List[Dict[str, Any]]:
     return _ninox_get("/tables/Facturas/records")
 
 def obtener_lineas_factura() -> List[Dict[str, Any]]:
-    # OJO: nombre con espacio
+    # nombre con espacio → Lineas%20Factura
     return _ninox_get("/tables/Lineas%20Factura/records")
 
 def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
@@ -112,7 +110,7 @@ def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
 # --------------------------
 def _linea_pertenece_a_factura(linea: Dict[str, Any], factura_id: str) -> bool:
     flds = linea.get("fields", {}) or {}
-    # nombres comunes del link
+    # Nombres posibles del campo relacional
     link = flds.get("Factura") or flds.get("Facturas") or flds.get("Factura Id") or flds.get("FacturaRef")
     if not link:
         return False
@@ -174,12 +172,14 @@ if not productos:
     st.warning("No hay productos en Ninox"); st.stop()
 
 # ==========================
-# STATE ÍTEMS
+# ESTADO LOCAL
 # ==========================
 if "line_items" not in st.session_state:
     st.session_state["line_items"] = []
 if "lock_items" not in st.session_state:
-    st.session_state["lock_items"] = True  # bloquea edición cuando vienen de Ninox
+    st.session_state["lock_items"] = False  # se ajusta antes de pintar el checkbox
+if "prev_factura_no" not in st.session_state:
+    st.session_state["prev_factura_no"] = None
 
 # ==========================
 # CLIENTE
@@ -199,7 +199,7 @@ with col2:
     st.text_input("Correo",    value=cliente_fields.get("Correo", ""),     disabled=True)
 
 # ==========================
-# FACTURA: SELECCIÓN Y AUTO-CARGA
+# FACTURA (AUTO-CARGA)
 # ==========================
 st.header("Factura")
 
@@ -212,39 +212,39 @@ for f in facturas:
         map_no_to[no] = f.get("id")
 
 siguiente_no = calcular_siguiente_factura_no(facturas)
+opciones = ["(Nueva) " + siguiente_no] + sorted(map_no_to.keys())
 
-colf1, colf2 = st.columns([2,1])
-with colf1:
-    opciones = ["(Nueva) " + siguiente_no] + sorted(map_no_to.keys())
-    sel = st.selectbox("Factura (existente por número)", opciones, key="sel_factura_no")
-with colf2:
-    st.checkbox("Bloquear edición si viene de Ninox", value=st.session_state["lock_items"],
-                key="lock_items")
+sel = st.selectbox("Factura (existente o nueva)", opciones, key="sel_factura_no")
 
-# número visible y editable si quieres escribirlo manualmente
-factura_no = st.text_input("Factura No.", value=(siguiente_no if sel.startswith("(Nueva)") else sel),
-                           help="Escribe o selecciona un número existente para cargar sus ítems automáticamente.")
+# Permite escribir manualmente también
+factura_no = st.text_input("Factura No.", value=(siguiente_no if sel.startswith("(Nueva)") else sel))
 
-# Detecta si ese número existe en Ninox
+# ¿Existe en Ninox?
 factura_id_sel = map_no_to.get(factura_no.strip())
 
-# Si existe, traer SIEMPRE las líneas más recientes desde Ninox (no usamos cache)
-if factura_id_sel:
-    # refresco de lineas por si cambiaste algo en Ninox
-    lineas_factura = obtener_lineas_factura()
-    st.session_state["lineas_factura"] = lineas_factura
+# Si cambió el número seleccionado, actualiza items desde Ninox (y solo aquí, ANTES del checkbox)
+if factura_no != st.session_state["prev_factura_no"]:
+    st.session_state["prev_factura_no"] = factura_no
+    if factura_id_sel:
+        # refrescamos de la base por si hay cambios
+        lineas_factura = obtener_lineas_factura()
+        st.session_state["lineas_factura"] = lineas_factura
+        lns = lineas_de_factura(factura_id_sel, lineas_factura)
+        st.session_state["line_items"] = [item_desde_linea((lf.get("fields") or {})) for lf in lns]
+        # establecer valor por defecto del bloqueo ANTES de crear el widget
+        st.session_state["lock_items"] = True
+    else:
+        # nueva factura → desbloquear por defecto
+        st.session_state["line_items"] = st.session_state.get("line_items", [])
+        st.session_state["lock_items"] = False
 
-    lns = lineas_de_factura(factura_id_sel, lineas_factura)
-    st.session_state["line_items"] = [item_desde_linea((lf.get("fields") or {})) for lf in lns]
-    st.session_state["lock_items"] = True  # bloquear por defecto cuando vienen de Ninox
-else:
-    # Nueva factura: no tocamos lo que el usuario añada manualmente
-    pass
+# Ahora sí: crear el checkbox (no reasignaremos esta clave después)
+st.checkbox("Bloquear edición si viene de Ninox", key="lock_items")
 
 fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 
 # ==========================
-# ÍTEMS (ocultar si bloqueado)
+# ÍTEMS (entrada manual si no está bloqueado)
 # ==========================
 if not st.session_state["lock_items"]:
     st.header("Agregar Productos manualmente")
@@ -252,8 +252,7 @@ if not st.session_state["lock_items"]:
         f"{(p.get('fields', {}) or {}).get('Código','')} | {(p.get('fields', {}) or {}).get('Descripción','')}"
         for p in productos
     ]
-    prod_idx    = st.selectbox("Producto", range(len(nombres_productos)),
-                               format_func=lambda x: nombres_productos[x])
+    prod_idx    = st.selectbox("Producto", range(len(nombres_productos)), format_func=lambda x: nombres_productos[x])
     prod_fields = productos[prod_idx].get("fields", {}) or {}
 
     cantidad    = st.number_input("Cantidad", min_value=1.0, value=1.0, step=1.0)
@@ -273,13 +272,14 @@ if not st.session_state["lock_items"]:
 else:
     st.info("Ítems cargados automáticamente desde Ninox.")
 
-# Mostrar ítems (solo lectura si vienen de Ninox)
+# Mostrar ítems
 if st.session_state["line_items"]:
     st.write("#### Ítems de la factura")
     for idx, i in enumerate(st.session_state["line_items"], start=1):
         st.write(f"{idx}. {i['codigo']} | {i['descripcion']} | Cant: {i['cantidad']:.2f} | "
                  f"P.U.: {i['precioUnitario']:.2f} | ITBMS: {i['valorITBMS']:.2f}")
 
+    # Controles de edición solo si no está bloqueado
     if not st.session_state["lock_items"]:
         c1, c2 = st.columns(2)
         with c1:
@@ -323,7 +323,7 @@ if st.button("Enviar Factura a DGI"):
     if not emisor.strip():
         st.error("Debe ingresar el nombre de quien emite la factura antes de enviarla."); st.stop()
     if not st.session_state["line_items"]:
-        st.error("Debe haber al menos un ítem (de Ninox o manual)."); st.stop()
+        st.error("Debe haber al menos un ítem."); st.stop()
 
     forma_pago_codigo = {"Efectivo": "01", "Débito": "02", "Crédito": "03"}[medio_pago]
 
@@ -457,7 +457,9 @@ with st.expander("Ayuda / Referencias"):
         """
         - Tablas: `Clientes`, `Productos`, `Facturas`, `Lineas Factura` (con espacio).
         - Al seleccionar o escribir un **Factura No.** que exista en Ninox,
-          se cargan **automáticamente** sus líneas y se bloquea la edición (puedes desactivar el bloqueo).
+          se cargan automáticamente sus líneas.
+        - El checkbox se inicializa antes de crearlo para evitar errores de estado de widgets.
         - El parser numérico acepta `$25,50`, `1.234,56`, etc.
         """
     )
+
