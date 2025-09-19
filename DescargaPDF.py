@@ -1,14 +1,17 @@
 import streamlit as st
 import requests
 from datetime import date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Union
 
 # ==========================
 # CONFIGURACIÓN / LOGIN
 # ==========================
-st.set_page_config(page_title="Facturación Electrónica — IOM Panamá (API Ninox)", layout="centered")
+st.set_page_config(page_title="Facturación Electrónica — IOM Panamá", layout="centered")
 
-USUARIOS = {"Mispanama": "Maxilo2000", "usuario1": "password123"}
+USUARIOS = {
+    "Mispanama": "Maxilo2000",
+    "usuario1": "password123",
+}
 
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
@@ -30,79 +33,30 @@ if st.sidebar.button("Cerrar sesión"):
     st.rerun()
 
 # ==========================
-# NINOX API CONFIG (SOLO-API)
+# NINOX API CONFIG
 # ==========================
-API_TOKEN   = "PON_AQUI_TU_TOKEN"             # <-- coloca tu token válido
-TEAM_ID     = "fhmgaLpFghyh5sNHh"             # <-- de tu URL
-DATABASE_ID = "er0sibgl3dug"                  # <-- de tu URL
+API_TOKEN   = "03035f50-93e2-11f0-883e-db77626d62e5"
+TEAM_ID     = "fhmgaLpFghyh5sNHh"
+DATABASE_ID = "er0sibgl3dug"
 
 BASE_URL = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}"
 HEADERS  = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
-# Nombres de tablas (ajústalos si difieren en tu base):
-TABLE_CLIENTES       = "Clientes"
-TABLE_PRODUCTOS      = "Productos"
-TABLE_FACTURAS       = "Facturas"
-TABLE_LINEAS_FACTURA = "Lineas Factura"       # si no tiene espacio, cámbiala a "LineasFactura"
-
 # ==========================
-# DEBUG / DIAGNÓSTICO
+# UTILIDADES
 # ==========================
-def ping_ninox():
-    url = f"{BASE_URL}/tables"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        st.write("Ping /tables →", r.status_code)
-        st.code(r.text[:1500])
-    except Exception as e:
-        st.error(f"Error de conexión: {e}")
-
-def test_clientes():
-    url = f"{BASE_URL}/tables/{TABLE_CLIENTES.replace(' ','%20')}/records"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        st.write("GET Clientes →", r.status_code)
-        if r.ok:
-            data = r.json()
-            st.write(f"Total registros: {len(data)}")
-            if data:
-                st.json(data[0])
-        else:
-            st.code(r.text[:1500])
-    except Exception as e:
-        st.error(f"Error de conexión: {e}")
-
-with st.sidebar.expander("Diagnóstico API"):
-    if st.button("Probar conexión Ninox"):
-        ping_ninox()
-    if st.button("Test tabla Clientes"):
-        test_clientes()
-
-# ==========================
-# UTILIDADES NINOX
-# ==========================
-def _ninox_get(path: str, params: Optional[Dict[str, Any]] = None, page_size: int = 200) -> List[Dict[str, Any]]:
+def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int = 200) -> List[Dict[str, Any]]:
+    """Descarga todos los registros de una tabla Ninox con paginación."""
     out: List[Dict[str, Any]] = []
     offset = 0
     while True:
         q = dict(params or {})
         q.update({"limit": page_size, "offset": offset})
         url = f"{BASE_URL}{path}"
-        try:
-            r = requests.get(url, headers=HEADERS, params=q, timeout=30)
-        except Exception as e:
-            st.error(f"Error de conexión a Ninox: {e}")
-            break
-
+        r = requests.get(url, headers=HEADERS, params=q, timeout=30)
         if not r.ok:
-            if r.status_code == 401:
-                st.error("Ninox 401 — Token inválido o no autorizado para este equipo/base.")
-            elif r.status_code == 403:
-                st.error(f"Ninox 403 — El usuario/token no tiene permisos o el plan no permite la API. {r.text}")
-            else:
-                st.error(f"Error Ninox GET {path}: {r.status_code} — {r.text}")
+            st.error(f"Error Ninox GET {path}: {r.status_code} — {r.text}")
             break
-
         batch = r.json() or []
         out.extend(batch)
         if len(batch) < page_size:
@@ -110,107 +64,89 @@ def _ninox_get(path: str, params: Optional[Dict[str, Any]] = None, page_size: in
         offset += page_size
     return out
 
-def obtener_tabla(tablename: str) -> List[Dict[str, Any]]:
-    safe_name = tablename.replace(" ", "%20")
-    return _ninox_get(f"/tables/{safe_name}/records")
-
-def obtener_clientes() -> List[Dict[str, Any]]:
-    return obtener_tabla(TABLE_CLIENTES)
-
-def obtener_productos() -> List[Dict[str, Any]]:
-    return obtener_tabla(TABLE_PRODUCTOS)
-
-def obtener_facturas() -> List[Dict[str, Any]]:
-    return obtener_tabla(TABLE_FACTURAS)
-
-def obtener_lineas_factura() -> List[Dict[str, Any]]:
-    datos = obtener_tabla(TABLE_LINEAS_FACTURA)
-    if not datos and " " in TABLE_LINEAS_FACTURA:
-        alt = TABLE_LINEAS_FACTURA.replace(" ", "")
-        datos = obtener_tabla(alt)
-    return datos
-
-# ==========================
-# HELPERS DE DATOS
-# ==========================
-def _clean_num(x) -> float:
-    if x is None:
+def as_float(v: Union[str, int, float, None]) -> float:
+    """Convierte valores numéricos desde Ninox (soporta '48,00', '1.234,56', etc.)."""
+    if v is None:
         return 0.0
-    if isinstance(x, (int, float)):
-        return float(x)
-    s = str(x).replace("$", "").replace(",", "").replace("%", "").strip()
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if s == "":
+        return 0.0
+    # Si hay coma decimal (formato ES): quitar separadores de miles y cambiar coma por punto
+    if "," in s and s.count(",") == 1:
+        s = s.replace(".", "").replace(",", ".")
+    # Si queda algo raro, intenta última conversión
     try:
         return float(s)
     except Exception:
         return 0.0
 
-def _fields(rec: Dict[str, Any]) -> Dict[str, Any]:
-    return (rec.get("fields", {}) or {})
+# ==========================
+# LECTURA DE TABLAS
+# ==========================
+def obtener_clientes() -> List[Dict[str, Any]]:
+    return _ninox_get("/tables/Clientes/records")
 
-def _extraer_lineas_embebidas(factura_rec: Dict[str, Any]) -> List[Dict[str, Any]]:
-    f = _fields(factura_rec)
-    posibles = ["LíneasFactura", "LineasFactura", "Líneas Factura", "Lineas Factura"]
-    lineas = None
-    for k in posibles:
-        if k in f:
-            lineas = f[k]
-            break
-    out: List[Dict[str, Any]] = []
-    if isinstance(lineas, list):
-        for row in lineas:
-            rf = row.get("fields", row) if isinstance(row, dict) else {}
-            desc   = (rf.get("Descripción") or rf.get("Descripcion") or "").strip()
-            cant   = _clean_num(rf.get("Cantidad"))
-            pu     = _clean_num(rf.get("Precio Unitario") or rf.get("PU"))
-            tasa   = _clean_num(rf.get("ITBMS"))
-            itbmsv = round(cant * pu * tasa, 2)
-            out.append({
-                "codigo":         rf.get("Código", "") or rf.get("Codigo", "") or "",
-                "descripcion":    desc or "SIN DESCRIPCIÓN",
-                "cantidad":       float(cant),
-                "precioUnitario": float(pu),
-                "tasa":           float(tasa),
-                "valorITBMS":     float(itbmsv),
-            })
-    return out
+def obtener_productos() -> List[Dict[str, Any]]:
+    return _ninox_get("/tables/Productos/records")
 
-def _extraer_lineas_por_tabla(numero_factura: str, lineas_api: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for rec in lineas_api:
-        rf = _fields(rec)
-        rel_ok = False
-        for key in ["Factura No.", "Factura", "FacturaNo", "Factura_Numero"]:
-            if key in rf and str(rf[key]).strip() == str(numero_factura).strip():
-                rel_ok = True
-                break
-        if not rel_ok:
-            continue
+def obtener_facturas() -> List[Dict[str, Any]]:
+    return _ninox_get("/tables/Facturas/records")
 
-        desc   = (rf.get("Descripción") or rf.get("Descripcion") or "").strip()
-        cant   = _clean_num(rf.get("Cantidad"))
-        pu     = _clean_num(rf.get("Precio Unitario") or rf.get("PU"))
-        tasa   = _clean_num(rf.get("ITBMS"))
-        itbmsv = round(cant * pu * tasa, 2)
-        out.append({
-            "codigo":         rf.get("Código", "") or rf.get("Codigo", "") or "",
-            "descripcion":    desc or "SIN DESCRIPCIÓN",
-            "cantidad":       float(cant),
-            "precioUnitario": float(pu),
-            "tasa":           float(tasa),
-            "valorITBMS":     float(itbmsv),
-        })
-    return out
+def obtener_lineas_factura() -> List[Dict[str, Any]]:
+    """Tabla hija con los ítems de factura."""
+    return _ninox_get("/tables/LineasFactura/records")
 
 def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
     max_factura = 0
     for f in facturas:
-        valor = _fields(f).get("Factura No.", "")
+        valor = (f.get("fields", {}) or {}).get("Factura No.", "")
         try:
             n = int(str(valor).strip() or 0)
-            max_factura = max(max_factura, n)
+            if n > max_factura:
+                max_factura = n
         except Exception:
             continue
     return f"{max_factura + 1:08d}"
+
+# --------------------------
+# Relación Factura ↔ Línea
+# --------------------------
+def _factura_id(rec: Dict[str, Any]) -> str:
+    """Devuelve el id Ninox del registro (e.g. 'm4q6…')."""
+    return str(rec.get("id") or "")
+
+def _linea_pertenece_a_factura(linea: Dict[str, Any], factura_id: str) -> bool:
+    """
+    Devuelve True si la línea está vinculada a la factura dada.
+    Soporta diferentes formas en que Ninox puede devolver el campo relacional:
+    - id simple: 'Factura': 'abcd1234'
+    - lista de ids: 'Factura': ['abcd1234', ...]
+    - objeto: 'Factura': {'id': 'abcd1234', 'table': 'Facturas'}
+    - lista de objetos: 'Factura': [{'id': 'abcd1234'}, ...]
+    """
+    flds = linea.get("fields", {}) or {}
+    link = flds.get("Factura") or flds.get("Facturas") or flds.get("Factura Id")  # nombres posibles
+    if not link:
+        return False
+
+    def _id_eq(x) -> bool:
+        try:
+            if isinstance(x, str):
+                return x == factura_id
+            if isinstance(x, dict):
+                return str(x.get("id") or "") == factura_id
+            return False
+        except Exception:
+            return False
+
+    if isinstance(link, list):
+        return any(_id_eq(x) for x in link)
+    return _id_eq(link)
+
+def lineas_de_factura(lineas: List[Dict[str, Any]], factura_id: str) -> List[Dict[str, Any]]:
+    return [lf for lf in lineas if _linea_pertenece_a_factura(lf, factura_id)]
 
 # ==========================
 # CARGA / REFRESCO DE DATOS
@@ -228,118 +164,121 @@ if "facturas" not in st.session_state:
 if "lineas_factura" not in st.session_state:
     st.session_state["lineas_factura"] = obtener_lineas_factura()
 
-clientes  = st.session_state.get("clientes", [])
-productos = st.session_state.get("productos", [])
-facturas  = st.session_state.get("facturas", [])
-lineas    = st.session_state.get("lineas_factura", [])
+clientes       = st.session_state["clientes"]
+productos      = st.session_state["productos"]
+facturas       = st.session_state["facturas"]
+lineas_factura = st.session_state["lineas_factura"]
 
 if not clientes:
-    st.warning("No hay clientes en Ninox (API)."); st.stop()
+    st.warning("No hay clientes en Ninox")
+    st.stop()
 if not productos:
-    st.warning("No hay productos en Ninox (API)."); st.stop()
-if not facturas:
-    st.warning("No hay facturas en Ninox (API)."); st.stop()
+    st.warning("No hay productos en Ninox")
+    st.stop()
 
 # ==========================
-# ÍTEMS (state)
+# MIGRACIÓN/INICIALIZACIÓN DE ÍTEMS
 # ==========================
 if "line_items" not in st.session_state:
-    st.session_state["line_items"] = []
+    prev = st.session_state.get("items", [])
+    st.session_state["line_items"] = prev if isinstance(prev, list) else []
+    st.session_state.pop("items", None)
 
 # ==========================
-# TIPO DOC
-# ==========================
-st.sidebar.markdown("## Tipo de documento")
-doc_humano = st.sidebar.selectbox("Seleccione", ["Factura", "Nota de Crédito"])
-DOC_MAP = {"Factura": "01", "Nota de Crédito": "06"}
-doc_type = DOC_MAP[doc_humano]
-
-# ==========================
-# CLIENTE
+# SELECCIÓN DE CLIENTE
 # ==========================
 st.header("Datos del Cliente")
 
-def _nombre_cliente(c: Dict[str, Any], idx: int) -> str:
-    f = _fields(c)
-    return f.get("cliente") or f.get("Nombre") or f"Cliente {idx}"
-
-nombres_clientes = [_nombre_cliente(c, i+1) for i, c in enumerate(clientes)]
-cliente_idx = st.selectbox("Seleccione Cliente", range(len(clientes)), format_func=lambda x: nombres_clientes[x])
-cliente_fields = _fields(clientes[cliente_idx])
+nombres_clientes = [c.get("fields", {}).get("Nombre", f"Cliente {i}") for i, c in enumerate(clientes, start=1)]
+cliente_idx = st.selectbox("Seleccione Cliente", range(len(nombres_clientes)), format_func=lambda x: nombres_clientes[x])
+cliente_fields: Dict[str, Any] = clientes[cliente_idx].get("fields", {}) or {}
 
 col1, col2 = st.columns(2)
 with col1:
-    st.text_input("RUC",       value=(cliente_fields.get("RUC") or ""),        disabled=True)
-    st.text_input("DV",        value=(cliente_fields.get("DV") or ""),         disabled=True)
-    st.text_area ("Dirección", value=(cliente_fields.get("Dirección") or cliente_fields.get("Direccion") or ""), disabled=True)
+    st.text_input("RUC",       value=cliente_fields.get("RUC", ""),        disabled=True)
+    st.text_input("DV",        value=cliente_fields.get("DV", ""),         disabled=True)
+    st.text_area ("Dirección", value=cliente_fields.get("Dirección", ""),  disabled=True)
 with col2:
-    st.text_input("Teléfono",  value=(cliente_fields.get("Teléfono") or cliente_fields.get("Telefono") or ""), disabled=True)
-    st.text_input("Correo",    value=(cliente_fields.get("Correo") or ""),     disabled=True)
+    st.text_input("Teléfono",  value=cliente_fields.get("Teléfono", ""),   disabled=True)
+    st.text_input("Correo",    value=cliente_fields.get("Correo", ""),     disabled=True)
 
 # ==========================
-# NÚMERO DOC + FACTURA PENDIENTE
+# FACTURA EXISTENTE O NUEVA
 # ==========================
-facturas_pend = [f for f in facturas if str((_fields(f).get("Estado") or "")).strip().lower() == "pendiente"]
-
-selected_factura_rec = None
-if doc_type == "01":
-    if facturas_pend:
-        opciones_facturas = [str(_fields(f).get("Factura No.", "")) for f in facturas_pend]
-        idx_factura = st.selectbox("Seleccione Factura Pendiente", range(len(opciones_facturas)),
-                                   format_func=lambda x: opciones_facturas[x])
-        numero_preview = str(opciones_facturas[idx_factura])
-        selected_factura_rec = facturas_pend[idx_factura]
-    else:
-        numero_preview = calcular_siguiente_factura_no(facturas)
+facturas_pendientes = [f for f in facturas if (f.get("fields", {}) or {}).get("Estado", "").strip().lower() == "pendiente"]
+if facturas_pendientes:
+    opciones_facturas = [(
+        f.get("id"),
+        (f.get("fields", {}) or {}).get("Factura No.", ""),
+    ) for f in facturas_pendientes]
+    idx_factura = st.selectbox(
+        "Seleccione Factura Pendiente",
+        range(len(opciones_facturas)),
+        format_func=lambda x: str(opciones_facturas[x][1])
+    )
+    factura_id_sel, factura_no_preview = opciones_facturas[idx_factura]
 else:
-    numero_preview = "00000001"  # correlativo NC si luego se integra la tabla de NC
+    factura_id_sel = ""
+    factura_no_preview = calcular_siguiente_factura_no(facturas)
 
-st.text_input("Número de Documento Fiscal", value=numero_preview, disabled=True)
+st.text_input("Factura No.", value=factura_no_preview, disabled=True)
 fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 
-# Medio de pago (si la factura lo trae)
-medio_pago_opciones = ["Efectivo", "Débito", "Crédito"]
-medio_pago_default = "Efectivo"
-if selected_factura_rec:
-    mp = str(_fields(selected_factura_rec).get("Medio de Pago") or "").strip().capitalize()
-    if mp in medio_pago_opciones:
-        medio_pago_default = mp
+# ==========================
+# NUEVO: CARGAR LÍNEAS DESDE NINOX
+# ==========================
+def _cargar_lineas_desde_ninox():
+    if not factura_id_sel:
+        st.warning("Seleccione una factura pendiente para cargar sus líneas.")
+        return
+    # Filtrar líneas vinculadas a la factura seleccionada
+    lns = lineas_de_factura(lineas_factura, factura_id_sel)
+    if not lns:
+        st.info("Esta factura no tiene líneas asociadas en Ninox.")
+        return
+    # Limpiar los ítems actuales y poblar desde Ninox
+    st.session_state["line_items"] = []
+    for lf in lns:
+        flds = lf.get("fields", {}) or {}
+        codigo      = flds.get("Código", "") or flds.get("Codigo", "") or ""
+        descripcion = flds.get("Descripción", "") or flds.get("Descripcion", "") or "SIN DESCRIPCIÓN"
+        cantidad    = as_float(flds.get("Cantidad", 0))
+        pu          = as_float(flds.get("Precio Unitario", 0))
+        tasa        = as_float(flds.get("ITBMS", 0))  # ej. 0.07
+        valor_itbms = round(tasa * cantidad * pu, 2)
+
+        st.session_state["line_items"].append({
+            "codigo":         codigo,
+            "descripcion":    descripcion,
+            "cantidad":       float(cantidad),
+            "precioUnitario": float(pu),
+            "tasa":           float(tasa),
+            "valorITBMS":     float(valor_itbms),
+        })
+
+st.button("Cargar líneas desde Ninox", on_click=_cargar_lineas_desde_ninox)
 
 # ==========================
-# AUTOCARGA DE ÍTEMS (API)
+# ÍTEMS (Entrada manual adicional)
 # ==========================
-st.divider()
-if selected_factura_rec is not None:
-    if st.button("Cargar líneas desde la factura (API)"):
-        items = _extraer_lineas_embebidas(selected_factura_rec)
-        if not items:
-            items = _extraer_lineas_por_tabla(numero_preview, lineas)
-        st.session_state["line_items"] = items
-        if not items:
-            st.warning("No se encontraron líneas (ni subtabla embebida ni coincidencias en 'Lineas Factura').")
+st.header("Agregar Productos a la Factura")
 
-# ==========================
-# ÍTEMS: AGREGAR MANUAL (desde Productos)
-# ==========================
-st.header("Ítems del documento (puedes agregar o editar)")
-
-def _label_prod(p: Dict[str, Any]) -> str:
-    f = _fields(p)
-    return f"{f.get('Código','') or f.get('Codigo','')} | {f.get('Descripción','') or f.get('Descripcion','')}"
-
-prod_labels = [_label_prod(p) for p in productos]
-prod_idx = st.selectbox("Producto", range(len(productos)), format_func=lambda x: prod_labels[x])
-pf = _fields(productos[prod_idx])
+nombres_productos = [
+    f"{(p.get('fields', {}) or {}).get('Código','')} | {(p.get('fields', {}) or {}).get('Descripción','')}"
+    for p in productos
+]
+prod_idx    = st.selectbox("Producto", range(len(nombres_productos)), format_func=lambda x: nombres_productos[x])
+prod_fields = productos[prod_idx].get("fields", {}) or {}
 
 cantidad    = st.number_input("Cantidad", min_value=1.0, value=1.0, step=1.0)
-precio_unit = _clean_num(pf.get("Precio Unitario") or pf.get("PU"))
-itbms_rate  = _clean_num(pf.get("ITBMS") or 0)
+precio_unit = float(prod_fields.get("Precio Unitario", 0) or 0)
+itbms_rate  = float(prod_fields.get("ITBMS", 0) or 0)   # p.ej. 0.07
 
 if st.button("Agregar ítem"):
-    valor_itbms = round(itbms_rate * float(cantidad) * float(precio_unit), 2)
+    valor_itbms = round(itbms_rate * cantidad * precio_unit, 2)
     st.session_state["line_items"].append({
-        "codigo":         pf.get("Código", "") or pf.get("Codigo", "") or "",
-        "descripcion":    pf.get("Descripción", "") or pf.get("Descripcion", "") or "SIN DESCRIPCIÓN",
+        "codigo":         prod_fields.get("Código", ""),
+        "descripcion":    prod_fields.get("Descripción", ""),
         "cantidad":       float(cantidad),
         "precioUnitario": float(precio_unit),
         "tasa":           float(itbms_rate),
@@ -347,7 +286,7 @@ if st.button("Agregar ítem"):
     })
 
 if st.session_state["line_items"]:
-    st.write("#### Ítems del documento")
+    st.write("#### Ítems de la factura")
     for idx, i in enumerate(st.session_state["line_items"], start=1):
         st.write(f"{idx}. {i['codigo']} | {i['descripcion']} | Cant: {i['cantidad']:.2f} | P.U.: {i['precioUnitario']:.2f} | ITBMS: {i['valorITBMS']:.2f}")
     c1, c2 = st.columns(2)
@@ -360,70 +299,52 @@ if st.session_state["line_items"]:
             if 0 < idx_del <= len(st.session_state["line_items"]):
                 st.session_state["line_items"].pop(idx_del - 1)
 
-# ==========================
 # TOTALES
-# ==========================
-total_neto  = sum(i["cantidad"] * i["precioUnitario"] for i in st.session_state["line_items"])
-total_itbms = sum(i["valorITBMS"] for i in st.session_state["line_items"])
-total_total = total_neto + total_itbms
+total_neto    = sum(i["cantidad"] * i["precioUnitario"] for i in st.session_state["line_items"])
+total_itbms   = sum(i["valorITBMS"] for i in st.session_state["line_items"])
+total_factura = total_neto + total_itbms
 
-st.write(f"**Total Neto:** {total_neto:.2f}   **ITBMS:** {total_itbms:.2f}   **Total:** {total_total:.2f}")
+st.write(f"**Total Neto:** {total_neto:.2f}   **ITBMS:** {total_itbms:.2f}   **Total a Pagar:** {total_factura:.2f}")
 
-medio_pago = st.selectbox("Medio de Pago", medio_pago_opciones, index=medio_pago_opciones.index(medio_pago_default))
-emisor     = st.text_input("Nombre de quien emite el documento (obligatorio)", value=st.session_state.get("emisor", ""))
+medio_pago = st.selectbox("Medio de Pago", ["Efectivo", "Débito", "Crédito"])
+emisor     = st.text_input("Nombre de quien emite la factura (obligatorio)", value=st.session_state.get("emisor", ""))
 if emisor:
     st.session_state["emisor"] = emisor
 
 # ==========================
-# BACKEND + EMAIL UI
+# BACKEND DGI
 # ==========================
 BACKEND_URL = "https://ninox-factory-server.onrender.com"
 
-enviar_email = st.checkbox("Enviar CAFE por correo al cliente", value=True)
-email_destino_default = (cliente_fields.get("Correo") or "").strip()
-email_to = st.text_input("Email destino", value=email_destino_default if enviar_email else "", disabled=not enviar_email)
-email_cc = st.text_input("CC (opcional, separa por comas)", value="", disabled=not enviar_email)
+if "pdf_bytes" not in st.session_state:
+    st.session_state["pdf_bytes"] = None
+    st.session_state["pdf_name"]  = None
 
-def _ninox_refrescar_tablas():
-    st.session_state["facturas"]       = obtener_facturas()
-    st.session_state["lineas_factura"] = obtener_lineas_factura()
+def _ninox_refrescar_facturas():
+    st.session_state["facturas"] = obtener_facturas()
 
 # ==========================
-# PAYLOAD A DGI
+# ENVIAR A DGI
 # ==========================
-def armar_payload_documento(
-    *,
-    doc_type: str,
-    numero_documento: str,
-    fecha_emision: date,
-    cliente_fields: Dict[str, Any],
-    items: List[Dict[str, Any]],
-    total_neto: float,
-    total_itbms: float,
-    total: float,
-    medio_pago: str,
-    motivo_nc: str = "",
-    factura_afectada: str = "",
-) -> Dict[str, Any]:
+if st.button("Enviar Factura a DGI"):
+    if not emisor.strip():
+        st.error("Debe ingresar el nombre de quien emite la factura antes de enviarla.")
+        st.stop()
+    if not st.session_state["line_items"]:
+        st.error("Debe agregar al menos un producto.")
+        st.stop()
 
     forma_pago_codigo = {"Efectivo": "01", "Débito": "02", "Crédito": "03"}[medio_pago]
-    formato_cafe  = 3 if doc_type == "06" else 1
-    entrega_cafe  = 3 if doc_type == "06" else 1
-    tipo_venta    = "" if doc_type == "06" else 1
 
-    info_interes = ""
-    if doc_type == "06":
-        ref = f" (afecta a la factura {str(factura_afectada).strip()})" if str(factura_afectada).strip() else ""
-        info_interes = (motivo_nc or "Nota de crédito") + ref
-
+    # Construcción de ítems payload
     lista_items = []
-    for i in items:
+    for i in st.session_state["line_items"]:
         precio_item = i["cantidad"] * i["precioUnitario"]
         valor_total = precio_item + i["valorITBMS"]
         tasa_itbms  = "01" if (i.get("tasa", 0) or 0) > 0 else "00"
         lista_items.append({
-            "codigo":                  i.get("codigo") or "0",
-            "descripcion":             i.get("descripcion") or "SIN DESCRIPCIÓN",
+            "codigo":                  i["codigo"] or "0",
+            "descripcion":             i["descripcion"] or "SIN DESCRIPCIÓN",
             "codigoGTIN":              "0",
             "cantidad":                f"{i['cantidad']:.2f}",
             "precioUnitario":          f"{i['precioUnitario']:.2f}",
@@ -443,28 +364,27 @@ def armar_payload_documento(
             "tipoSucursal": "1",
             "datosTransaccion": {
                 "tipoEmision": "01",
-                "tipoDocumento": doc_type,
-                "numeroDocumentoFiscal": str(numero_documento),
+                "tipoDocumento": "01",
+                "numeroDocumentoFiscal": str(factura_no_preview),
                 "puntoFacturacionFiscal": "001",
-                "fechaEmision": f"{fecha_emision.isoformat()}T09:00:00-05:00",
                 "naturalezaOperacion": "01",
                 "tipoOperacion": 1,
                 "destinoOperacion": 1,
-                "formatoCAFE": formato_cafe,
-                "entregaCAFE": entrega_cafe,
+                "formatoCAFE": 1,
+                "entregaCAFE": 1,
                 "envioContenedor": 1,
                 "procesoGeneracion": 1,
-                "tipoVenta": tipo_venta,
-                "informacionInteres": info_interes,
+                "tipoVenta": 1,
+                "fechaEmision": f"{fecha_emision.isoformat()}T09:00:00-05:00",
                 "cliente": {
-                    "tipoClienteFE": "02" if (cliente_fields.get("RUC") or "").strip() else "01",
+                    "tipoClienteFE": "02",
                     "tipoContribuyente": 1,
                     "numeroRUC": (cliente_fields.get("RUC", "") or "").replace("-", ""),
                     "digitoVerificadorRUC": cliente_fields.get("DV", ""),
-                    "razonSocial": cliente_fields.get("cliente") or cliente_fields.get("Nombre") or "",
-                    "direccion": cliente_fields.get("Dirección") or cliente_fields.get("Direccion") or "",
-                    "telefono1": cliente_fields.get("Teléfono") or cliente_fields.get("Telefono") or "",
-                    "correoElectronico1": cliente_fields.get("Correo") or "",
+                    "razonSocial": cliente_fields.get("Nombre", ""),
+                    "direccion": cliente_fields.get("Dirección", ""),
+                    "telefono1": cliente_fields.get("Teléfono", ""),
+                    "correoElectronico1": cliente_fields.get("Correo", ""),
                     "pais": "PA",
                 },
             },
@@ -476,88 +396,58 @@ def armar_payload_documento(
                 "totalDescuento":     "0.00",
                 "totalAcarreoCobrado":"0.00",
                 "valorSeguroCobrado": "0.00",
-                "totalFactura":       f"{total:.2f}",
-                "totalValorRecibido": f"{total:.2f}",
+                "totalFactura":       f"{total_factura:.2f}",
+                "totalValorRecibido": f"{total_factura:.2f}",
                 "vuelto":             "0.00",
-                "tiempoPago":         "1" if doc_type == "01" else "3",
+                "tiempoPago":         "1",
                 "nroItems":           str(len(lista_items)),
-                "totalTodosItems":    f"{total:.2f}",
+                "totalTodosItems":    f"{total_factura:.2f}",
                 "listaFormaPago": {
                     "formaPago": [{
                         "formaPagoFact":    forma_pago_codigo,
-                        "valorCuotaPagada": f"{total:.2f}",
+                        "valorCuotaPagada": f"{total_factura:.2f}",
                     }]
                 },
-                "listaPagoPlazo": {
-                    "pagoPlazo": [{
-                        "fechaVenceCuota": f"{fecha_emision.isoformat()}T23:59:59-05:00",
-                        "valorCuota": f"{total:.2f}"
-                    }]
-                }
             },
         }
     }
-    return payload
 
-# ==========================
-# ENVIAR (BACKEND)
-# ==========================
-if st.button("Enviar Documento a DGI"):
-    if not emisor.strip():
-        st.error("Debe ingresar el nombre de quien emite el documento."); st.stop()
-    if not st.session_state["line_items"]:
-        st.error("Debe agregar al menos un ítem o cargar las líneas desde la factura (API)."); st.stop()
-
-    motivo_nc = ""
-    factura_afectada = ""
-
+    # POST al backend — enviar factura
     try:
-        payload = armar_payload_documento(
-            doc_type=doc_type,
-            numero_documento=numero_preview,
-            fecha_emision=fecha_emision,
-            cliente_fields=cliente_fields,
-            items=st.session_state["line_items"],
-            total_neto=total_neto,
-            total_itbms=total_itbms,
-            total=total_total,
-            medio_pago=medio_pago,
-            motivo_nc=motivo_nc,
-            factura_afectada=factura_afectada,
-        )
-
-        r = requests.post(f"{BACKEND_URL}/enviar-factura", json=payload, timeout=60)
+        url_envio = f"{BACKEND_URL}/enviar-factura"
+        r = requests.post(url_envio, json=payload, timeout=60)
         if r.ok:
-            st.success(f"{doc_humano} enviada correctamente ✅")
+            st.success("Factura enviada correctamente. Generando PDF…")
             st.session_state["line_items"] = []
-            _ninox_refrescar_tablas()
+            _ninox_refrescar_facturas()
+            st.session_state["ultima_factura_no"] = str(factura_no_preview)
 
-            if enviar_email and (email_to or "").strip():
-                email_json = {
-                    "to": [e.strip() for e in (email_to or "").split(",") if e.strip()],
-                    "cc": [e.strip() for e in (email_cc or "").split(",") if e.strip()],
-                    "subject": f"{'Nota de Crédito' if doc_type=='06' else 'Factura'} electrónica #{numero_documento}",
-                    "body_html": f"""
-                    <p>Estimado(a),</p>
-                    <p>Se ha generado su {'Nota de Crédito' if doc_type=='06' else 'Factura'} <b>#{numero_documento}</b>.</p>
-                    <p>Adjuntamos el CAFE oficial desde nuestro sistema.</p>
-                    <p>Saludos,<br>IOM Panamá</p>
-                    """,
-                    "meta": {
-                        "codigoSucursalEmisor":  "0000",
-                        "numeroDocumentoFiscal": str(numero_documento),
-                        "puntoFacturacionFiscal":"001",
-                        "tipoDocumento":         doc_type,
-                        "tipoEmision":           "01",
-                    }
-                }
-                rem = requests.post(f"{BACKEND_URL}/enviar-cafe-email", json=email_json, timeout=60)
-                if rem.ok:
-                    st.success("CAFE enviado por correo 📧")
-                else:
-                    st.warning("Documento creado; no se pudo enviar el email (revisa backend / logs).")
+            # Intento de descarga PDF inmediata
+            url_pdf = f"{BACKEND_URL}/descargar-pdf"
+            pdf_payload = {
+                "codigoSucursalEmisor":  "0000",
+                "numeroDocumentoFiscal": str(factura_no_preview),
+                "puntoFacturacionFiscal":"001",
+                "tipoDocumento":         "01",
+                "tipoEmision":           "01",
+                "serialDispositivo":     "",
+            }
+            rpdf = requests.post(url_pdf, json=pdf_payload, stream=True, timeout=60)
+            ct = rpdf.headers.get("content-type", "")
+            if rpdf.ok and ct.startswith("application/pdf"):
+                st.session_state["pdf_bytes"] = rpdf.content
+                st.session_state["pdf_name"]  = f"Factura_{factura_no_preview}.pdf"
+                st.success("¡PDF generado y listo para descargar abajo!")
+            else:
+                st.session_state["pdf_bytes"] = None
+                st.session_state["pdf_name"]  = None
+                st.error("Factura enviada, pero no se pudo generar el PDF automáticamente.")
+                try:
+                    st.write(rpdf.json())
+                except Exception:
+                    st.write(rpdf.text)
         else:
-            st.error("Error al enviar el documento.")
+            st.error("Error al enviar la factura.")
             try:
                 st.write(r.json())
             except Exception:
@@ -566,14 +456,31 @@ if st.button("Enviar Documento a DGI"):
         st.error(f"Error de conexión con el backend: {e}")
 
 # ==========================
-# AYUDA
+# DESCARGA PDF
 # ==========================
-with st.expander("Ayuda / Referencias (API Ninox)"):
+if st.session_state.get("pdf_bytes") and st.session_state.get("pdf_name"):
+    st.markdown("---")
+    st.header("Descargar PDF de la Factura Electrónica")
+    st.download_button(
+        label="Descargar PDF",
+        data=st.session_state["pdf_bytes"],
+        file_name=st.session_state["pdf_name"],
+        mime="application/pdf",
+    )
+
+# ==========================
+# INFO / AYUDA
+# ==========================
+with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
-        - Usa **exclusivamente la API de Ninox**; necesitas token válido y permisos en el team/base.
-        - IDs usados: **TEAM_ID=fhmgaLpFghyh5sNHh**, **DATABASE_ID=er0sibgl3dug**.
-        - Tablas esperadas: `Clientes`, `Productos`, `Facturas`, `Lineas Factura` (o `LineasFactura`).
-        - Diagnóstico: usa **Probar conexión Ninox** y **Test tabla Clientes** en la barra lateral.
+        - Tablas Ninox usadas: `Clientes`, `Productos`, `Facturas`, `LineasFactura`.
+        - Campos esperados (sensibles a mayúsculas):
+          - **Clientes**: Nombre, RUC, DV, Dirección, Teléfono, Correo
+          - **Productos**: Código, Descripción, Precio Unitario, ITBMS (decimal; ej. 0.07)
+          - **Facturas**: Estado (use "Pendiente"), "Factura No."
+          - **LineasFactura**: (relación) Factura → Facturas, Descripción, Cantidad, Precio Unitario, ITBMS, (opcional) Código
+        - Botón **“Cargar líneas desde Ninox”**: trae los ítems de la factura seleccionada y recalcula los totales.
+        - El parser numérico admite coma decimal (ej. 48,00).
         """
     )
