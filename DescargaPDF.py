@@ -41,7 +41,7 @@ BASE_URL = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}"
 HEADERS  = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
 # ==========================
-# UTILIDADES
+# UTILIDADES HTTP
 # ==========================
 def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int = 200) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
@@ -61,9 +61,11 @@ def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int =
         offset += page_size
     return out
 
+# ==========================
+# PARSE NÚMEROS
+# ==========================
 _num_keep = re.compile(r"[^0-9\-,\.]")  # quita símbolos ($, espacios, etc.)
 def as_float(v: Union[str, int, float, None]) -> float:
-    """Convierte '48,00', '$25,50', '1.234,56' -> float."""
     if v is None:
         return 0.0
     if isinstance(v, (int, float)):
@@ -71,7 +73,7 @@ def as_float(v: Union[str, int, float, None]) -> float:
     s = _num_keep.sub("", str(v).strip())
     if s == "":
         return 0.0
-    # si hay coma decimal (y punto es separador de miles)
+    # coma decimal (y punto separador de miles)
     if s.count(",") == 1 and s.rfind(",") > s.rfind("."):
         s = s.replace(".", "").replace(",", ".")
     try:
@@ -80,7 +82,7 @@ def as_float(v: Union[str, int, float, None]) -> float:
         return 0.0
 
 # ==========================
-# LECTURA DE TABLAS
+# TABLAS
 # ==========================
 def obtener_clientes() -> List[Dict[str, Any]]:
     return _ninox_get("/tables/Clientes/records")
@@ -106,18 +108,26 @@ def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
             pass
     return f"{max_factura + 1:08d}"
 
-# --------------------------
-# Relación Factura ↔ Línea (robusta)
-# --------------------------
+# ==========================
+# VÍNCULO FACTURA ↔ LÍNEA (ultrarobusto)
+# ==========================
+def _any_string_contains(obj: Any, needle: str) -> bool:
+    """True si needle aparece en cualquier string dentro de obj (dict/list/string)."""
+    try:
+        if isinstance(obj, str):
+            return needle in obj
+        if isinstance(obj, dict):
+            return any(_any_string_contains(v, needle) for v in obj.values())
+        if isinstance(obj, list):
+            return any(_any_string_contains(x, needle) for x in obj)
+    except Exception:
+        pass
+    return False
+
 def _linea_pertenece_a_factura(linea: Dict[str, Any], factura_id: str, factura_no: str | None = None) -> bool:
-    """
-    True si la línea pertenece a la factura. Soporta:
-      - link por id (str/dict/list)
-      - link como *etiqueta* de texto que contiene el número (p.ej. "00000074 Pendiente Juan...")
-      - cualquier campo cuyo nombre contenga 'factur'
-    """
     flds = (linea.get("fields") or {})
 
+    # candidatos frecuentes del campo relacional
     candidates = [
         flds.get("Factura"), flds.get("Facturas"),
         flds.get("Factura Id"), flds.get("FacturaRef"),
@@ -133,7 +143,7 @@ def _linea_pertenece_a_factura(linea: Dict[str, Any], factura_id: str, factura_n
             return str(x.get("id") or "") == factura_id
         return False
 
-    # 1) por id
+    # 1) por id exacto (en string, dict o lista)
     for c in candidates:
         if isinstance(c, list):
             if any(_id_eq(x) for x in c):
@@ -141,15 +151,20 @@ def _linea_pertenece_a_factura(linea: Dict[str, Any], factura_id: str, factura_n
         elif _id_eq(c):
             return True
 
-    # 2) por etiqueta que contenga el número
+    # 2) por número en etiqueta de texto
     if factura_no:
         facno = str(factura_no).strip()
+        # en candidatos directos
         for c in candidates:
             if isinstance(c, str) and facno and facno in c:
                 return True
+        # en cualquier campo que contenga "factur" en el nombre
         for k, v in flds.items():
-            if "factur" in str(k).lower() and isinstance(v, str) and facno in v:
+            if "factur" in str(k).lower() and isinstance(v, (str, list, dict)) and _any_string_contains(v, facno):
                 return True
+        # última red: en cualquier string del registro (por si el builder renombró)
+        if _any_string_contains(flds, facno):
+            return True
 
     return False
 
@@ -161,7 +176,7 @@ def item_desde_linea(fields: Dict[str, Any]) -> Dict[str, Any]:
     descripcion = fields.get("Descripción", "") or fields.get("Descripcion", "") or "SIN DESCRIPCIÓN"
     cantidad    = as_float(fields.get("Cantidad", 0))
     pu          = as_float(fields.get("Precio Unitario", 0))
-    tasa        = as_float(fields.get("ITBMS", 0))  # puede venir vacío → 0
+    tasa        = as_float(fields.get("ITBMS", 0))  # puede venir vacío
     valor_itbms = round(tasa * cantidad * pu, 2)
     return {
         "codigo":         codigo,
@@ -207,6 +222,8 @@ if "lock_items" not in st.session_state:
     st.session_state["lock_items"] = False
 if "prev_factura_no" not in st.session_state:
     st.session_state["prev_factura_no"] = None
+if "debug_modo" not in st.session_state:
+    st.session_state["debug_modo"] = False
 
 # ==========================
 # CLIENTE
@@ -239,15 +256,13 @@ for f in facturas:
         map_no_to[no] = str(f.get("id"))
 
 siguiente_no = calcular_siguiente_factura_no(facturas)
-opciones = ["(Nueva) " + siguiente_no] + sorted(map_no_to.keys())
+sel = st.selectbox("Factura (existente o nueva)", ["(Nueva) " + siguiente_no] + sorted(map_no_to.keys()),
+                   key="sel_factura_no")
 
-sel = st.selectbox("Factura (existente o nueva)", opciones, key="sel_factura_no")
 factura_no = st.text_input("Factura No.", value=(siguiente_no if sel.startswith("(Nueva)") else sel))
-
-# ¿Existe en Ninox?
 factura_id_sel = map_no_to.get(factura_no.strip())
 
-# Si cambió el número, recargar ítems desde Ninox (antes de pintar el checkbox)
+# Si cambió el número, recargar ítems desde Ninox (antes del checkbox)
 if factura_no != st.session_state["prev_factura_no"]:
     st.session_state["prev_factura_no"] = factura_no
     if factura_id_sel:
@@ -257,13 +272,16 @@ if factura_no != st.session_state["prev_factura_no"]:
         lns = lineas_de_factura(factura_id_sel, factura_no, lineas_factura)
         st.session_state["line_items"] = [item_desde_linea((lf.get("fields") or {})) for lf in lns]
         st.session_state["lock_items"] = True
+        st.session_state["debug_ult_lns"] = lns  # para diagnóstico
         st.info(f"Ítems cargados automáticamente desde Ninox. ({len(lns)} línea/s)")
     else:
         st.session_state["lock_items"] = False
-        # no tocamos line_items: permite agregar manual para nuevas
 
-# Ahora sí: crear el checkbox (no reasignaremos la clave después)
+# Checkbox (no lo reasignamos después)
 st.checkbox("Bloquear edición si viene de Ninox", key="lock_items")
+
+# Toggle debug
+st.toggle("Modo diagnóstico (mostrar cómo vienen las líneas)", key="debug_modo")
 
 fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 
@@ -313,6 +331,23 @@ if st.session_state["line_items"]:
             if st.button("Eliminar"):
                 if 0 < idx_del <= len(st.session_state["line_items"]):
                     st.session_state["line_items"].pop(idx_del - 1)
+
+# ==========================
+# DIAGNÓSTICO (para ver por qué no encuentra líneas)
+# ==========================
+if st.session_state.get("debug_modo"):
+    st.markdown("### ⚙️ Diagnóstico de `Lineas Factura`")
+    st.caption("Muestra los primeros registros y cómo se detecta el vínculo con la factura seleccionada.")
+    muestra = st.session_state.get("debug_ult_lns")
+    if muestra is None and factura_id_sel:
+        # si aún no se había cargado, intenta una pasada
+        lns = lineas_de_factura(factura_id_sel, factura_no, st.session_state["lineas_factura"])
+        muestra = lns
+    st.write(f"Factura seleccionada: **{factura_no}**  (id: `{factura_id_sel}`)")
+    # enseña 5 registros de la tabla para inspección
+    ej = (st.session_state["lineas_factura"] or [])[:5]
+    st.json({"ejemplo_5_registros": ej})
+    st.json({"lineas_detectadas_para_factura": muestra or []})
 
 # ==========================
 # TOTALES
@@ -479,8 +514,7 @@ with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
         - Tablas: `Clientes`, `Productos`, `Facturas`, `Lineas Factura`.
-        - Al seleccionar/escribir un **Factura No.** existente, se cargan automáticamente sus líneas (por id o por etiqueta).
-        - El checkbox se inicializa antes de crearlo para evitar errores de estado.
-        - El parser numérico acepta `$25,50`, `1.234,56`, etc.
+        - Al seleccionar/escribir un **Factura No.** existente, se cargan automáticamente sus líneas.
+        - Si no ves ítems, activa *Modo diagnóstico* para ver cómo llegan los registros desde Ninox.
         """
     )
