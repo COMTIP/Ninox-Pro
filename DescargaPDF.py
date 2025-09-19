@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 from datetime import date
 from typing import List, Dict, Any, Union
+import re
 
 # ==========================
 # CONFIGURACIÓN / LOGIN
@@ -60,7 +61,9 @@ def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int =
         offset += page_size
     return out
 
+_num_keep = re.compile(r"[^0-9\-,\.]")  # elimina todo lo que NO sea dígito, coma, punto o signo -
 def as_float(v: Union[str, int, float, None]) -> float:
+    """Convierte valores tipo '48,00', '$25,50', '1.234,56'."""
     if v is None:
         return 0.0
     if isinstance(v, (int, float)):
@@ -68,7 +71,9 @@ def as_float(v: Union[str, int, float, None]) -> float:
     s = str(v).strip()
     if s == "":
         return 0.0
-    if "," in s and s.count(",") == 1:
+    s = _num_keep.sub("", s)  # quita $ y otros símbolos
+    # si hay coma decimal única, convertir a punto y eliminar separadores de miles
+    if s.count(",") == 1 and (s.rfind(",") > s.rfind(".")):
         s = s.replace(".", "").replace(",", ".")
     try:
         return float(s)
@@ -88,7 +93,7 @@ def obtener_facturas() -> List[Dict[str, Any]]:
     return _ninox_get("/tables/Facturas/records")
 
 def obtener_lineas_factura() -> List[Dict[str, Any]]:
-    # ¡IMPORTANTE!: Nombre real con espacio → Lineas%20Factura
+    # OJO: nombre con espacio
     return _ninox_get("/tables/Lineas%20Factura/records")
 
 def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
@@ -97,10 +102,9 @@ def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
         valor = (f.get("fields", {}) or {}).get("Factura No.", "")
         try:
             n = int(str(valor).strip() or 0)
-            if n > max_factura:
-                max_factura = n
+            max_factura = max(max_factura, n)
         except Exception:
-            continue
+            pass
     return f"{max_factura + 1:08d}"
 
 # --------------------------
@@ -108,34 +112,31 @@ def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
 # --------------------------
 def _linea_pertenece_a_factura(linea: Dict[str, Any], factura_id: str) -> bool:
     flds = linea.get("fields", {}) or {}
-    # Campo relacional típico en la tabla Lineas Factura
+    # nombres comunes del link
     link = flds.get("Factura") or flds.get("Facturas") or flds.get("Factura Id") or flds.get("FacturaRef")
     if not link:
         return False
 
-    def _id_eq(x) -> bool:
-        try:
-            if isinstance(x, str):
-                return x == factura_id
-            if isinstance(x, dict):
-                return str(x.get("id") or "") == factura_id
-            return False
-        except Exception:
-            return False
+    def _eq(x) -> bool:
+        if isinstance(x, str):
+            return x == factura_id
+        if isinstance(x, dict):
+            return str(x.get("id") or "") == factura_id
+        return False
 
     if isinstance(link, list):
-        return any(_id_eq(x) for x in link)
-    return _id_eq(link)
+        return any(_eq(x) for x in link)
+    return _eq(link)
 
-def lineas_de_factura(lineas: List[Dict[str, Any]], factura_id: str) -> List[Dict[str, Any]]:
+def lineas_de_factura(factura_id: str, lineas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [lf for lf in lineas if _linea_pertenece_a_factura(lf, factura_id)]
 
-def construir_item_desde_linea(fields: Dict[str, Any]) -> Dict[str, Any]:
+def item_desde_linea(fields: Dict[str, Any]) -> Dict[str, Any]:
     codigo      = fields.get("Código", "") or fields.get("Codigo", "") or ""
     descripcion = fields.get("Descripción", "") or fields.get("Descripcion", "") or "SIN DESCRIPCIÓN"
     cantidad    = as_float(fields.get("Cantidad", 0))
     pu          = as_float(fields.get("Precio Unitario", 0))
-    tasa        = as_float(fields.get("ITBMS", 0))  # ej. 0.07
+    tasa        = as_float(fields.get("ITBMS", 0))
     valor_itbms = round(tasa * cantidad * pu, 2)
     return {
         "codigo":         codigo,
@@ -168,23 +169,22 @@ facturas       = st.session_state["facturas"]
 lineas_factura = st.session_state["lineas_factura"]
 
 if not clientes:
-    st.warning("No hay clientes en Ninox")
-    st.stop()
+    st.warning("No hay clientes en Ninox"); st.stop()
 if not productos:
-    st.warning("No hay productos en Ninox")
-    st.stop()
+    st.warning("No hay productos en Ninox"); st.stop()
 
 # ==========================
 # STATE ÍTEMS
 # ==========================
 if "line_items" not in st.session_state:
     st.session_state["line_items"] = []
+if "lock_items" not in st.session_state:
+    st.session_state["lock_items"] = True  # bloquea edición cuando vienen de Ninox
 
 # ==========================
-# SELECCIÓN DE CLIENTE
+# CLIENTE
 # ==========================
 st.header("Datos del Cliente")
-
 nombres_clientes = [c.get("fields", {}).get("Nombre", f"Cliente {i}") for i, c in enumerate(clientes, start=1)]
 cliente_idx = st.selectbox("Seleccione Cliente", range(len(nombres_clientes)), format_func=lambda x: nombres_clientes[x])
 cliente_fields: Dict[str, Any] = clientes[cliente_idx].get("fields", {}) or {}
@@ -199,76 +199,97 @@ with col2:
     st.text_input("Correo",    value=cliente_fields.get("Correo", ""),     disabled=True)
 
 # ==========================
-# FACTURA EXISTENTE O NUEVA (AUTO-CARGA ÍTEMS)
+# FACTURA: SELECCIÓN Y AUTO-CARGA
 # ==========================
 st.header("Factura")
 
-# Mapa: numero -> (id, estado)
-facturas_num_map: Dict[str, Dict[str, Any]] = {}
+# mapa numero -> id
+map_no_to = {}
 for f in facturas:
-    flds = (f.get("fields", {}) or {})
-    fno  = str(flds.get("Factura No.", "")).strip()
-    if fno:
-        facturas_num_map[fno] = {"id": f.get("id"), "estado": str(flds.get("Estado", "")).strip()}
+    flds = f.get("fields", {}) or {}
+    no   = str(flds.get("Factura No.", "")).strip()
+    if no:
+        map_no_to[no] = f.get("id")
 
 siguiente_no = calcular_siguiente_factura_no(facturas)
 
-opciones_factura = [f"**Nueva** {siguiente_no}"] + sorted(facturas_num_map.keys())
-sel = st.selectbox("Factura (existente o nueva)", opciones_factura, key="sel_factura_no")
+colf1, colf2 = st.columns([2,1])
+with colf1:
+    opciones = ["(Nueva) " + siguiente_no] + sorted(map_no_to.keys())
+    sel = st.selectbox("Factura (existente por número)", opciones, key="sel_factura_no")
+with colf2:
+    st.checkbox("Bloquear edición si viene de Ninox", value=st.session_state["lock_items"],
+                key="lock_items")
 
-if sel.startswith("**Nueva**"):
-    factura_no = siguiente_no
-    factura_id_sel = ""
+# número visible y editable si quieres escribirlo manualmente
+factura_no = st.text_input("Factura No.", value=(siguiente_no if sel.startswith("(Nueva)") else sel),
+                           help="Escribe o selecciona un número existente para cargar sus ítems automáticamente.")
+
+# Detecta si ese número existe en Ninox
+factura_id_sel = map_no_to.get(factura_no.strip())
+
+# Si existe, traer SIEMPRE las líneas más recientes desde Ninox (no usamos cache)
+if factura_id_sel:
+    # refresco de lineas por si cambiaste algo en Ninox
+    lineas_factura = obtener_lineas_factura()
+    st.session_state["lineas_factura"] = lineas_factura
+
+    lns = lineas_de_factura(factura_id_sel, lineas_factura)
+    st.session_state["line_items"] = [item_desde_linea((lf.get("fields") or {})) for lf in lns]
+    st.session_state["lock_items"] = True  # bloquear por defecto cuando vienen de Ninox
 else:
-    factura_no = sel
-    factura_id_sel = str(facturas_num_map[factura_no]["id"])
-    # AUTO: cargar ítems desde Lineas Factura
-    lns = lineas_de_factura(lineas_factura, factura_id_sel)
-    st.session_state["line_items"] = [construir_item_desde_linea((lf.get("fields") or {})) for lf in lns]
+    # Nueva factura: no tocamos lo que el usuario añada manualmente
+    pass
 
-st.text_input("Factura No.", value=factura_no, disabled=True)
 fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 
 # ==========================
-# ÍTEMS (Entrada manual adicional)
+# ÍTEMS (ocultar si bloqueado)
 # ==========================
-st.header("Agregar Productos a la Factura")
+if not st.session_state["lock_items"]:
+    st.header("Agregar Productos manualmente")
+    nombres_productos = [
+        f"{(p.get('fields', {}) or {}).get('Código','')} | {(p.get('fields', {}) or {}).get('Descripción','')}"
+        for p in productos
+    ]
+    prod_idx    = st.selectbox("Producto", range(len(nombres_productos)),
+                               format_func=lambda x: nombres_productos[x])
+    prod_fields = productos[prod_idx].get("fields", {}) or {}
 
-nombres_productos = [
-    f"{(p.get('fields', {}) or {}).get('Código','')} | {(p.get('fields', {}) or {}).get('Descripción','')}"
-    for p in productos
-]
-prod_idx    = st.selectbox("Producto", range(len(nombres_productos)), format_func=lambda x: nombres_productos[x])
-prod_fields = productos[prod_idx].get("fields", {}) or {}
+    cantidad    = st.number_input("Cantidad", min_value=1.0, value=1.0, step=1.0)
+    precio_unit = float(prod_fields.get("Precio Unitario", 0) or 0)
+    itbms_rate  = float(prod_fields.get("ITBMS", 0) or 0)
 
-cantidad    = st.number_input("Cantidad", min_value=1.0, value=1.0, step=1.0)
-precio_unit = float(prod_fields.get("Precio Unitario", 0) or 0)
-itbms_rate  = float(prod_fields.get("ITBMS", 0) or 0)
+    if st.button("Agregar ítem"):
+        valor_itbms = round(itbms_rate * cantidad * precio_unit, 2)
+        st.session_state["line_items"].append({
+            "codigo":         prod_fields.get("Código", ""),
+            "descripcion":    prod_fields.get("Descripción", ""),
+            "cantidad":       float(cantidad),
+            "precioUnitario": float(precio_unit),
+            "tasa":           float(itbms_rate),
+            "valorITBMS":     float(valor_itbms),
+        })
+else:
+    st.info("Ítems cargados automáticamente desde Ninox.")
 
-if st.button("Agregar ítem"):
-    valor_itbms = round(itbms_rate * cantidad * precio_unit, 2)
-    st.session_state["line_items"].append({
-        "codigo":         prod_fields.get("Código", ""),
-        "descripcion":    prod_fields.get("Descripción", ""),
-        "cantidad":       float(cantidad),
-        "precioUnitario": float(precio_unit),
-        "tasa":           float(itbms_rate),
-        "valorITBMS":     float(valor_itbms),
-    })
-
+# Mostrar ítems (solo lectura si vienen de Ninox)
 if st.session_state["line_items"]:
     st.write("#### Ítems de la factura")
     for idx, i in enumerate(st.session_state["line_items"], start=1):
-        st.write(f"{idx}. {i['codigo']} | {i['descripcion']} | Cant: {i['cantidad']:.2f} | P.U.: {i['precioUnitario']:.2f} | ITBMS: {i['valorITBMS']:.2f}")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Limpiar Ítems"):
-            st.session_state["line_items"] = []
-    with c2:
-        idx_del = st.number_input("Eliminar ítem #", min_value=0, value=0, step=1)
-        if st.button("Eliminar"):
-            if 0 < idx_del <= len(st.session_state["line_items"]):
-                st.session_state["line_items"].pop(idx_del - 1)
+        st.write(f"{idx}. {i['codigo']} | {i['descripcion']} | Cant: {i['cantidad']:.2f} | "
+                 f"P.U.: {i['precioUnitario']:.2f} | ITBMS: {i['valorITBMS']:.2f}")
+
+    if not st.session_state["lock_items"]:
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Limpiar Ítems"):
+                st.session_state["line_items"] = []
+        with c2:
+            idx_del = st.number_input("Eliminar ítem #", min_value=0, value=0, step=1)
+            if st.button("Eliminar"):
+                if 0 < idx_del <= len(st.session_state["line_items"]):
+                    st.session_state["line_items"].pop(idx_del - 1)
 
 # ==========================
 # TOTALES
@@ -276,7 +297,6 @@ if st.session_state["line_items"]:
 total_neto    = sum(i["cantidad"] * i["precioUnitario"] for i in st.session_state["line_items"])
 total_itbms   = sum(i["valorITBMS"] for i in st.session_state["line_items"])
 total_factura = total_neto + total_itbms
-
 st.write(f"**Total Neto:** {total_neto:.2f}   **ITBMS:** {total_itbms:.2f}   **Total a Pagar:** {total_factura:.2f}")
 
 medio_pago = st.selectbox("Medio de Pago", ["Efectivo", "Débito", "Crédito"])
@@ -301,13 +321,11 @@ def _ninox_refrescar_facturas():
 # ==========================
 if st.button("Enviar Factura a DGI"):
     if not emisor.strip():
-        st.error("Debe ingresar el nombre de quien emite la factura antes de enviarla.")
-        st.stop()
+        st.error("Debe ingresar el nombre de quien emite la factura antes de enviarla."); st.stop()
     if not st.session_state["line_items"]:
-        st.error("Debe agregar al menos un producto.")
-        st.stop()
+        st.error("Debe haber al menos un ítem (de Ninox o manual)."); st.stop()
 
-    forma_pago_codigo = {"Efectivo": "01", "Débito": "02", "Crédito": "03"}
+    forma_pago_codigo = {"Efectivo": "01", "Débito": "02", "Crédito": "03"}[medio_pago]
 
     lista_items = []
     for i in st.session_state["line_items"]:
@@ -385,24 +403,21 @@ if st.button("Enviar Factura a DGI"):
     }
 
     try:
-        url_envio = f"{BACKEND_URL}/enviar-factura"
-        r = requests.post(url_envio, json=payload, timeout=60)
+        r = requests.post(f"{BACKEND_URL}/enviar-factura", json=payload, timeout=60)
         if r.ok:
             st.success("Factura enviada correctamente. Generando PDF…")
             st.session_state["line_items"] = []
             _ninox_refrescar_facturas()
             st.session_state["ultima_factura_no"] = str(factura_no)
 
-            url_pdf = f"{BACKEND_URL}/descargar-pdf"
-            pdf_payload = {
+            rpdf = requests.post(f"{BACKEND_URL}/descargar-pdf", json={
                 "codigoSucursalEmisor":  "0000",
                 "numeroDocumentoFiscal": str(factura_no),
                 "puntoFacturacionFiscal":"001",
                 "tipoDocumento":         "01",
                 "tipoEmision":           "01",
                 "serialDispositivo":     "",
-            }
-            rpdf = requests.post(url_pdf, json=pdf_payload, stream=True, timeout=60)
+            }, stream=True, timeout=60)
             ct = rpdf.headers.get("content-type", "")
             if rpdf.ok and ct.startswith("application/pdf"):
                 st.session_state["pdf_bytes"] = rpdf.content
@@ -412,16 +427,12 @@ if st.button("Enviar Factura a DGI"):
                 st.session_state["pdf_bytes"] = None
                 st.session_state["pdf_name"]  = None
                 st.error("Factura enviada, pero no se pudo generar el PDF automáticamente.")
-                try:
-                    st.write(rpdf.json())
-                except Exception:
-                    st.write(rpdf.text)
+                try: st.write(rpdf.json())
+                except Exception: st.write(rpdf.text)
         else:
             st.error("Error al enviar la factura.")
-            try:
-                st.write(r.json())
-            except Exception:
-                st.write(r.text)
+            try: st.write(r.json())
+            except Exception: st.write(r.text)
     except Exception as e:
         st.error(f"Error de conexión con el backend: {e}")
 
@@ -439,16 +450,14 @@ if st.session_state.get("pdf_bytes") and st.session_state.get("pdf_name"):
     )
 
 # ==========================
-# INFO / AYUDA
+# AYUDA
 # ==========================
 with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
         - Tablas: `Clientes`, `Productos`, `Facturas`, `Lineas Factura` (con espacio).
-        - Auto-carga: al elegir un **número de factura existente**, se traen sus líneas y se recalculan totales.
-        - Campos esperados:
-          - **Facturas**: "Factura No.", Estado
-          - **Lineas Factura**: (relación) Factura → Facturas, Descripción, Cantidad, Precio Unitario, ITBMS, (opcional) Código
-        - El parser numérico acepta coma decimal (ej. `48,00`).
+        - Al seleccionar o escribir un **Factura No.** que exista en Ninox,
+          se cargan **automáticamente** sus líneas y se bloquea la edición (puedes desactivar el bloqueo).
+        - El parser numérico acepta `$25,50`, `1.234,56`, etc.
         """
     )
