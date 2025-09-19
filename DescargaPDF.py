@@ -1,6 +1,6 @@
 import streamlit as st
 import requests
-from datetime import date, datetime
+from datetime import date
 from typing import List, Dict, Any
 
 # ==========================
@@ -69,8 +69,8 @@ def obtener_productos() -> List[Dict[str, Any]]:
 def obtener_facturas() -> List[Dict[str, Any]]:
     return _ninox_get("/tables/Facturas/records")
 
+# Tabla con espacio -> URL-encoding
 def obtener_notas_credito() -> List[Dict[str, Any]]:
-    # Tabla con espacio -> URL-encoding
     return _ninox_get("/tables/Nota%20de%20Credito/records")
 
 def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
@@ -96,38 +96,24 @@ def calcular_siguiente_nc_no(notas: List[Dict[str, Any]]) -> str:
     return f"{max_nc + 1:08d}"
 
 # ==========================
-# HELPERS (EXTRAER DESDE FACTURAS)
+# HELPERS PARA LÍNEAS DESDE FACTURAS
 # ==========================
 def _limpiar_num(x) -> float:
     if x is None:
         return 0.0
     if isinstance(x, (int, float)):
         return float(x)
-    s = str(x).replace("$", "").replace(",", "").replace("%", "").strip()
+    s = str(x).replace("$", "").replace(",", "").strip()
     try:
         return float(s)
     except Exception:
         return 0.0
 
-def _parse_fecha(fecha_str: str) -> date | None:
-    """
-    Intenta parsear 'Fecha + Hora' de Ninox. Si falla, retorna None.
-    Ejemplos: '21/07/2025 15:01', '2025-09-19', etc.
-    """
-    if not fecha_str:
-        return None
-    for fmt in ("%d/%m/%Y %H:%M", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(fecha_str, fmt).date()
-        except Exception:
-            continue
-    return None
-
 def extraer_lineas_desde_factura_record(factura_rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Lee el subtable de líneas embebido dentro de un record de Facturas.
     Soporta nombres: 'LíneasFactura', 'LineasFactura', 'Líneas Factura', 'Lineas Factura'.
-    Campos esperados por fila: Descripción, Cantidad, Precio Unitario, ITBMS, (opcional) Código.
+    Columnas esperadas: Descripción/Descripcion, Cantidad, Precio Unitario, ITBMS, (opcional) Código/Codigo.
     """
     fields = (factura_rec or {}).get("fields", {}) or {}
     posibles = ["LíneasFactura", "LineasFactura", "Líneas Factura", "Lineas Factura"]
@@ -144,9 +130,8 @@ def extraer_lineas_desde_factura_record(factura_rec: Dict[str, Any]) -> List[Dic
             desc   = (rf.get("Descripción") or rf.get("Descripcion") or "").strip()
             cant   = _limpiar_num(rf.get("Cantidad"))
             precio = _limpiar_num(rf.get("Precio Unitario"))
-            tasa   = _limpiar_num(rf.get("ITBMS"))  # 0.07 ó 0 (no %)
+            tasa   = _limpiar_num(rf.get("ITBMS"))  # ej. 0.07 ó 0
             valor_itbms = round(cant * precio * tasa, 2)
-
             salida.append({
                 "codigo":         rf.get("Código", "") or rf.get("Codigo", "") or "",
                 "descripcion":    desc or "SIN DESCRIPCIÓN",
@@ -203,13 +188,7 @@ doc_type = DOC_MAP[doc_humano]
 # CLIENTE
 # ==========================
 st.header("Datos del Cliente")
-# Mostrar 'cliente' si existe; si no, caer a 'Nombre'
-nombres_clientes = [
-    (c.get("fields", {}) or {}).get("cliente")
-    or (c.get("fields", {}) or {}).get("Nombre")
-    or f"Cliente {i}"
-    for i, c in enumerate(clientes, start=1)
-]
+nombres_clientes = [c.get("fields", {}).get("cliente", f"Cliente {i}") for i, c in enumerate(clientes, start=1)]
 cliente_idx = st.selectbox("Seleccione Cliente", range(len(nombres_clientes)), format_func=lambda x: nombres_clientes[x])
 cliente_fields: Dict[str, Any] = clientes[cliente_idx].get("fields", {}) or {}
 
@@ -247,19 +226,15 @@ if doc_type == "01":
 else:
     numero_preview = calcular_siguiente_nc_no(notas_credito)
 
-st.text_input("Factura No." if doc_type == "01" else "Número de Documento Fiscal",
-              value=numero_preview, disabled=True)
+st.text_input("Factura No." if doc_type == "01" else "Número de Documento Fiscal", value=numero_preview, disabled=True)
 
-# Fecha: si la factura trae 'Fecha + Hora', úsala; si no, hoy.
-fecha_factura_campos = (selected_factura_rec or {}).get("fields", {}) if selected_factura_rec else {}
-fecha_pre = _parse_fecha(str(fecha_factura_campos.get("Fecha + Hora", ""))) or date.today()
-fecha_emision = st.date_input("Fecha Emisión", value=fecha_pre)
+# Fecha Emisión (si la factura trae fecha, podrías mapearla aquí; por simplicidad usamos hoy)
+fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 
-# Medio de pago: preselección desde factura si existe
+# Medio de Pago (por defecto desde la factura si existe)
 medio_pago_opciones = ["Efectivo", "Débito", "Crédito"]
-medio_pago_default_raw = (fecha_factura_campos.get("Medio de Pago") or "").strip().capitalize()
-medio_map_normaliza = {"Debito": "Débito", "Credito": "Crédito"}
-medio_pago_default = medio_map_normaliza.get(medio_pago_default_raw, medio_pago_default_raw)
+fact_fields = (selected_factura_rec or {}).get("fields", {}) if selected_factura_rec else {}
+medio_pago_default  = (fact_fields.get("Medio de Pago") or "").strip().capitalize()
 if medio_pago_default not in medio_pago_opciones:
     medio_pago_default = "Efectivo"
 
@@ -414,7 +389,7 @@ def armar_payload_documento(
                     "tipoContribuyente": 1,
                     "numeroRUC": (cliente_fields.get("RUC", "") or "").replace("-", ""),
                     "digitoVerificadorRUC": cliente_fields.get("DV", ""),
-                    "razonSocial": cliente_fields.get("cliente", "") or cliente_fields.get("Nombre", ""),
+                    "razonSocial": cliente_fields.get("cliente", ""),
                     "direccion": cliente_fields.get("Dirección", ""),
                     "telefono1": cliente_fields.get("Teléfono", ""),
                     "correoElectronico1": cliente_fields.get("Correo", ""),
@@ -441,6 +416,7 @@ def armar_payload_documento(
                         "valorCuotaPagada": f"{total:.2f}",
                     }]
                 },
+                # Requisito del WS
                 "listaPagoPlazo": {
                     "pagoPlazo": [{
                         "fechaVenceCuota": f"{fecha_emision.isoformat()}T23:59:59-05:00",
@@ -459,12 +435,12 @@ if st.button("Enviar Documento a DGI"):
     if not emisor.strip():
         st.error("Debe ingresar el nombre de quien emite el documento."); st.stop()
     if not st.session_state["line_items"]:
-        st.error("Debe agregar al menos un ítem."); st.stop()
+        st.error("Debe agregar al menos un ítem o cargar las líneas desde la factura."); st.stop()
 
     motivo_nc = ""
     factura_afectada = ""
     if doc_type == "06":
-        st.error("Para Nota de Crédito, activa el tipo en la barra lateral y completa los campos específicos antes de enviar.")
+        st.error("Para Nota de Crédito, habilita los campos correspondientes en la UI.")  # placeholder si luego activas NC
         st.stop()
 
     numero_documento = numero_preview
@@ -531,10 +507,9 @@ with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
         - Tablas Ninox: `Clientes`, `Productos`, `Facturas`, **`Nota de Credito`**.
-        - Ahora los ítems pueden cargarse desde el sub-tabla **LíneasFactura** embebido en `Facturas`.
-        - Si el nombre del sub-tabla o de las columnas difiere, ajusta el extractor `extraer_lineas_desde_factura_record`.
+        - Para cargar los ítems de una factura pendiente, usa el botón **"Cargar líneas desde la factura seleccionada"**.
         - No se genera PDF en la app; el correo se envía llamando a **/enviar-cafe-email** en tu backend.
         - Requisitos WS: `listaPagoPlazo.pagoPlazo[0]` con `fechaVenceCuota` y `valorCuota`.
+        - El campo de nombre del cliente se espera como **`cliente`** en la tabla `Clientes`.
         """
     )
-
