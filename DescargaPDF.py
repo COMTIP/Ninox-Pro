@@ -61,7 +61,7 @@ def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int =
         offset += page_size
     return out
 
-_num_keep = re.compile(r"[^0-9\-,\.]")  # quita $, espacios, etc.
+_num_keep = re.compile(r"[^0-9\-,\.]")  # quita símbolos ($, espacios, etc.)
 def as_float(v: Union[str, int, float, None]) -> float:
     """Convierte '48,00', '$25,50', '1.234,56' -> float."""
     if v is None:
@@ -71,6 +71,7 @@ def as_float(v: Union[str, int, float, None]) -> float:
     s = _num_keep.sub("", str(v).strip())
     if s == "":
         return 0.0
+    # si hay coma decimal (y punto es separador de miles)
     if s.count(",") == 1 and s.rfind(",") > s.rfind("."):
         s = s.replace(".", "").replace(",", ".")
     try:
@@ -106,35 +107,61 @@ def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
     return f"{max_factura + 1:08d}"
 
 # --------------------------
-# Relación Factura ↔ Línea
+# Relación Factura ↔ Línea (robusta)
 # --------------------------
-def _linea_pertenece_a_factura(linea: Dict[str, Any], factura_id: str) -> bool:
-    flds = linea.get("fields", {}) or {}
-    # Nombres posibles del campo relacional
-    link = flds.get("Factura") or flds.get("Facturas") or flds.get("Factura Id") or flds.get("FacturaRef")
-    if not link:
-        return False
+def _linea_pertenece_a_factura(linea: Dict[str, Any], factura_id: str, factura_no: str | None = None) -> bool:
+    """
+    True si la línea pertenece a la factura. Soporta:
+      - link por id (str/dict/list)
+      - link como *etiqueta* de texto que contiene el número (p.ej. "00000074 Pendiente Juan...")
+      - cualquier campo cuyo nombre contenga 'factur'
+    """
+    flds = (linea.get("fields") or {})
 
-    def _eq(x) -> bool:
+    candidates = [
+        flds.get("Factura"), flds.get("Facturas"),
+        flds.get("Factura Id"), flds.get("FacturaRef"),
+        flds.get("Factura (link)"), flds.get("Facturas (link)"),
+    ]
+
+    def _id_eq(x) -> bool:
+        if not factura_id:
+            return False
         if isinstance(x, str):
             return x == factura_id
         if isinstance(x, dict):
             return str(x.get("id") or "") == factura_id
         return False
 
-    if isinstance(link, list):
-        return any(_eq(x) for x in link)
-    return _eq(link)
+    # 1) por id
+    for c in candidates:
+        if isinstance(c, list):
+            if any(_id_eq(x) for x in c):
+                return True
+        elif _id_eq(c):
+            return True
 
-def lineas_de_factura(factura_id: str, lineas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [lf for lf in lineas if _linea_pertenece_a_factura(lf, factura_id)]
+    # 2) por etiqueta que contenga el número
+    if factura_no:
+        facno = str(factura_no).strip()
+        for c in candidates:
+            if isinstance(c, str) and facno and facno in c:
+                return True
+        for k, v in flds.items():
+            if "factur" in str(k).lower() and isinstance(v, str) and facno in v:
+                return True
+
+    return False
+
+def lineas_de_factura(factura_id: str, factura_no: str, lineas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [lf for lf in lineas if _linea_pertenece_a_factura(lf, factura_id, factura_no)]
 
 def item_desde_linea(fields: Dict[str, Any]) -> Dict[str, Any]:
     codigo      = fields.get("Código", "") or fields.get("Codigo", "") or ""
     descripcion = fields.get("Descripción", "") or fields.get("Descripcion", "") or "SIN DESCRIPCIÓN"
     cantidad    = as_float(fields.get("Cantidad", 0))
     pu          = as_float(fields.get("Precio Unitario", 0))
-    tasa        = as_float(fields.get("ITBMS", 0))
+    tasa        = as_float(fields.get("ITBMS", 0))  # puede venir vacío → 0
     valor_itbms = round(tasa * cantidad * pu, 2)
     return {
         "codigo":         codigo,
@@ -177,7 +204,7 @@ if not productos:
 if "line_items" not in st.session_state:
     st.session_state["line_items"] = []
 if "lock_items" not in st.session_state:
-    st.session_state["lock_items"] = False  # se ajusta antes de pintar el checkbox
+    st.session_state["lock_items"] = False
 if "prev_factura_no" not in st.session_state:
     st.session_state["prev_factura_no"] = None
 
@@ -204,47 +231,44 @@ with col2:
 st.header("Factura")
 
 # mapa numero -> id
-map_no_to = {}
+map_no_to: Dict[str, str] = {}
 for f in facturas:
     flds = f.get("fields", {}) or {}
     no   = str(flds.get("Factura No.", "")).strip()
     if no:
-        map_no_to[no] = f.get("id")
+        map_no_to[no] = str(f.get("id"))
 
 siguiente_no = calcular_siguiente_factura_no(facturas)
 opciones = ["(Nueva) " + siguiente_no] + sorted(map_no_to.keys())
 
 sel = st.selectbox("Factura (existente o nueva)", opciones, key="sel_factura_no")
-
-# Permite escribir manualmente también
 factura_no = st.text_input("Factura No.", value=(siguiente_no if sel.startswith("(Nueva)") else sel))
 
 # ¿Existe en Ninox?
 factura_id_sel = map_no_to.get(factura_no.strip())
 
-# Si cambió el número seleccionado, actualiza items desde Ninox (y solo aquí, ANTES del checkbox)
+# Si cambió el número, recargar ítems desde Ninox (antes de pintar el checkbox)
 if factura_no != st.session_state["prev_factura_no"]:
     st.session_state["prev_factura_no"] = factura_no
     if factura_id_sel:
-        # refrescamos de la base por si hay cambios
+        # refrescar líneas por si hubo cambios en Ninox
         lineas_factura = obtener_lineas_factura()
         st.session_state["lineas_factura"] = lineas_factura
-        lns = lineas_de_factura(factura_id_sel, lineas_factura)
+        lns = lineas_de_factura(factura_id_sel, factura_no, lineas_factura)
         st.session_state["line_items"] = [item_desde_linea((lf.get("fields") or {})) for lf in lns]
-        # establecer valor por defecto del bloqueo ANTES de crear el widget
         st.session_state["lock_items"] = True
+        st.info(f"Ítems cargados automáticamente desde Ninox. ({len(lns)} línea/s)")
     else:
-        # nueva factura → desbloquear por defecto
-        st.session_state["line_items"] = st.session_state.get("line_items", [])
         st.session_state["lock_items"] = False
+        # no tocamos line_items: permite agregar manual para nuevas
 
-# Ahora sí: crear el checkbox (no reasignaremos esta clave después)
+# Ahora sí: crear el checkbox (no reasignaremos la clave después)
 st.checkbox("Bloquear edición si viene de Ninox", key="lock_items")
 
 fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 
 # ==========================
-# ÍTEMS (entrada manual si no está bloqueado)
+# ÍTEMS (manual solo si no está bloqueado)
 # ==========================
 if not st.session_state["lock_items"]:
     st.header("Agregar Productos manualmente")
@@ -279,7 +303,6 @@ if st.session_state["line_items"]:
         st.write(f"{idx}. {i['codigo']} | {i['descripcion']} | Cant: {i['cantidad']:.2f} | "
                  f"P.U.: {i['precioUnitario']:.2f} | ITBMS: {i['valorITBMS']:.2f}")
 
-    # Controles de edición solo si no está bloqueado
     if not st.session_state["lock_items"]:
         c1, c2 = st.columns(2)
         with c1:
@@ -455,10 +478,9 @@ if st.session_state.get("pdf_bytes") and st.session_state.get("pdf_name"):
 with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
-        - Tablas: `Clientes`, `Productos`, `Facturas`, `Lineas Factura` (con espacio).
-        - Al seleccionar o escribir un **Factura No.** que exista en Ninox,
-          se cargan automáticamente sus líneas.
-        - El checkbox se inicializa antes de crearlo para evitar errores de estado de widgets.
+        - Tablas: `Clientes`, `Productos`, `Facturas`, `Lineas Factura`.
+        - Al seleccionar/escribir un **Factura No.** existente, se cargan automáticamente sus líneas (por id o por etiqueta).
+        - El checkbox se inicializa antes de crearlo para evitar errores de estado.
         - El parser numérico acepta `$25,50`, `1.234,56`, etc.
         """
     )
