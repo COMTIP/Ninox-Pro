@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import pandas as pd
 from datetime import date
 from typing import List, Dict, Any
 
@@ -30,18 +31,67 @@ if st.sidebar.button("Cerrar sesión"):
     st.rerun()
 
 # ==========================
-# NINOX API CONFIG
+# MODO DE FUENTE DE DATOS
+# ==========================
+st.sidebar.markdown("## Fuente de datos")
+data_mode = st.sidebar.selectbox("Selecciona", ["CSV (recomendado)", "Ninox API"])
+
+# ==========================
+# UTILS GENERALES
+# ==========================
+def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    # normalizar encabezados: quitar espacios extras, unificar mayúsculas/minúsculas
+    df = df.copy()
+    df.columns = [c.strip().replace("\n", " ").replace("  ", " ") for c in df.columns]
+    return df
+
+def _first_existing(d: dict, keys: list[str], default=""):
+    for k in keys:
+        if k in d and d[k] not in (None, ""):
+            return d[k]
+    return default
+
+def _clean_num(x) -> float:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return 0.0
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).replace("$", "").replace(",", "").replace("%","").strip()
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+# ==========================
+# CARGA DE DATOS: CSV
+# ==========================
+def cargar_csvs() -> dict[str, pd.DataFrame]:
+    st.subheader("Cargar datos desde CSV (exportados de Ninox)")
+    c1, c2 = st.columns(2)
+    with c1:
+        f_clientes = st.file_uploader("Clientes.csv", type=["csv"], key="up_cli")
+        f_productos = st.file_uploader("Productos.csv", type=["csv"], key="up_prod")
+    with c2:
+        f_facturas = st.file_uploader("Facturas.csv", type=["csv"], key="up_fac")
+        f_lineas = st.file_uploader("LineasFactura.csv", type=["csv"], key="up_lin")
+
+    data = {}
+    if f_clientes:  data["clientes"]  = _norm_cols(pd.read_csv(f_clientes))
+    if f_productos: data["productos"] = _norm_cols(pd.read_csv(f_productos))
+    if f_facturas:  data["facturas"]  = _norm_cols(pd.read_csv(f_facturas))
+    if f_lineas:    data["lineas"]    = _norm_cols(pd.read_csv(f_lineas))
+
+    return data
+
+# ==========================
+# CARGA DE DATOS: NINOX API (OPCIONAL)
 # ==========================
 API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "u2g01uaua8tu"
-
 BASE_URL = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}"
 HEADERS  = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
-# ==========================
-# UTILIDADES NINOX
-# ==========================
 def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int = 200) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     offset = 0
@@ -60,121 +110,86 @@ def _ninox_get(path: str, params: Dict[str, Any] | None = None, page_size: int =
         offset += page_size
     return out
 
-def obtener_clientes() -> List[Dict[str, Any]]:
-    return _ninox_get("/tables/Clientes/records")
+def _records_to_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    for rec in records:
+        f = rec.get("fields", {}) or {}
+        rows.append(f)
+    df = pd.DataFrame(rows)
+    return _norm_cols(df)
 
-def obtener_productos() -> List[Dict[str, Any]]:
-    return _ninox_get("/tables/Productos/records")
+def cargar_desde_ninox() -> dict[str, pd.DataFrame]:
+    data = {}
+    cli = _ninox_get("/tables/Clientes/records")
+    pro = _ninox_get("/tables/Productos/records")
+    fac = _ninox_get("/tables/Facturas/records")
+    lin = _ninox_get("/tables/Lineas%20Factura/records")  # intenta nombre con espacio
+    if not lin:  # intento alterno
+        lin = _ninox_get("/tables/LineasFactura/records")
 
-def obtener_facturas() -> List[Dict[str, Any]]:
-    return _ninox_get("/tables/Facturas/records")
-
-# Tabla con espacio -> URL-encoding
-def obtener_notas_credito() -> List[Dict[str, Any]]:
-    return _ninox_get("/tables/Nota%20de%20Credito/records")
-
-def calcular_siguiente_factura_no(facturas: List[Dict[str, Any]]) -> str:
-    max_factura = 0
-    for f in facturas:
-        valor = (f.get("fields", {}) or {}).get("Factura No.", "")
-        try:
-            n = int(str(valor).strip() or 0)
-            max_factura = max(max_factura, n)
-        except Exception:
-            continue
-    return f"{max_factura + 1:08d}"
-
-def calcular_siguiente_nc_no(notas: List[Dict[str, Any]]) -> str:
-    max_nc = 0
-    for n in notas:
-        valor = (n.get("fields", {}) or {}).get("Credit No.", "")
-        try:
-            num = int(str(valor).strip() or 0)
-            max_nc = max(max_nc, num)
-        except Exception:
-            continue
-    return f"{max_nc + 1:08d}"
+    if cli: data["clientes"]  = _records_to_df(cli)
+    if pro: data["productos"] = _records_to_df(pro)
+    if fac: data["facturas"]  = _records_to_df(fac)
+    if lin: data["lineas"]    = _records_to_df(lin)
+    return data
 
 # ==========================
-# HELPERS PARA LÍNEAS DESDE FACTURAS
+# OBTENER DATASET (CSV por defecto)
 # ==========================
-def _limpiar_num(x) -> float:
-    if x is None:
-        return 0.0
-    if isinstance(x, (int, float)):
-        return float(x)
-    s = str(x).replace("$", "").replace(",", "").strip()
-    try:
-        return float(s)
-    except Exception:
-        return 0.0
+if data_mode == "CSV (recomendado)":
+    data = cargar_csvs()
+else:
+    st.info("Intentando cargar desde Ninox API…")
+    data = cargar_desde_ninox()
 
-def extraer_lineas_desde_factura_record(factura_rec: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Lee el subtable de líneas embebido dentro de un record de Facturas.
-    Soporta nombres: 'LíneasFactura', 'LineasFactura', 'Líneas Factura', 'Lineas Factura'.
-    Columnas esperadas: Descripción/Descripcion, Cantidad, Precio Unitario, ITBMS, (opcional) Código/Codigo.
-    """
-    fields = (factura_rec or {}).get("fields", {}) or {}
-    posibles = ["LíneasFactura", "LineasFactura", "Líneas Factura", "Lineas Factura"]
-    lineas = None
-    for k in posibles:
-        if k in fields:
-            lineas = fields[k]
-            break
+# Validación mínima
+if "clientes" not in data or data["clientes"].empty:
+    st.warning("Cargue al menos **Clientes.csv** para continuar."); st.stop()
+if "productos" not in data or data["productos"].empty:
+    st.warning("Cargue **Productos.csv** para poder agregar ítems."); st.stop()
+if "facturas" not in data or data["facturas"].empty:
+    st.warning("Cargue **Facturas.csv** (necesario para seleccionar facturas pendientes)."); st.stop()
 
-    salida: List[Dict[str, Any]] = []
-    if isinstance(lineas, list) and lineas:
-        for row in lineas:
-            rf = row.get("fields", row) if isinstance(row, dict) else {}
-            desc   = (rf.get("Descripción") or rf.get("Descripcion") or "").strip()
-            cant   = _limpiar_num(rf.get("Cantidad"))
-            precio = _limpiar_num(rf.get("Precio Unitario"))
-            tasa   = _limpiar_num(rf.get("ITBMS"))  # ej. 0.07 ó 0
-            valor_itbms = round(cant * precio * tasa, 2)
-            salida.append({
-                "codigo":         rf.get("Código", "") or rf.get("Codigo", "") or "",
-                "descripcion":    desc or "SIN DESCRIPCIÓN",
-                "cantidad":       cant,
-                "precioUnitario": precio,
-                "tasa":           tasa,
-                "valorITBMS":     valor_itbms,
-            })
-    return salida
+clientes_df  = data["clientes"]
+productos_df = data["productos"]
+facturas_df  = data["facturas"]
+lineas_df    = data.get("lineas", pd.DataFrame())
 
-# ==========================
-# CARGA / REFRESCO DE DATOS
-# ==========================
-if st.button("Actualizar datos de Ninox"):
-    for k in ("clientes", "productos", "facturas", "notas_credito"):
-        st.session_state.pop(k, None)
+# Mapear nombres de columnas flexibles
+def col(df: pd.DataFrame, opciones: list[str]) -> str | None:
+    for o in opciones:
+        if o in df.columns:
+            return o
+    return None
 
-if "clientes" not in st.session_state:
-    st.session_state["clientes"] = obtener_clientes()
-if "productos" not in st.session_state:
-    st.session_state["productos"] = obtener_productos()
-if "facturas" not in st.session_state:
-    st.session_state["facturas"] = obtener_facturas()
-if "notas_credito" not in st.session_state:
-    st.session_state["notas_credito"] = obtener_notas_credito()
+col_cli_nombre = col(clientes_df, ["cliente", "Cliente", "Nombre"])
+col_cli_ruc    = col(clientes_df, ["RUC","Ruc"])
+col_cli_dv     = col(clientes_df, ["DV","Dv","dv"])
+col_cli_dir    = col(clientes_df, ["Dirección","Direccion"])
+col_cli_tel    = col(clientes_df, ["Teléfono","Telefono"])
+col_cli_mail   = col(clientes_df, ["Correo","Email","email"])
 
-clientes      = st.session_state["clientes"]
-productos     = st.session_state["productos"]
-facturas      = st.session_state["facturas"]
-notas_credito = st.session_state["notas_credito"]
+col_prod_cod   = col(productos_df, ["Código","Codigo","code"])
+col_prod_desc  = col(productos_df, ["Descripción","Descripcion","description"])
+col_prod_pu    = col(productos_df, ["Precio Unitario","PU","PrecioUnitario"])
+col_prod_itbms = col(productos_df, ["ITBMS","IVA","Impuesto"])
 
-if not clientes:
-    st.warning("No hay clientes en Ninox"); st.stop()
-if not productos:
-    st.warning("No hay productos en Ninox"); st.stop()
+col_fac_num    = col(facturas_df, ["Factura No.","Factura No", "Factura", "Numero", "N°", "No."])
+col_fac_estado = col(facturas_df, ["Estado","estado"])
+col_fac_pago   = col(facturas_df, ["Medio de Pago","MedioPago","Pago"])
+
+col_lin_facnum = col(lineas_df, ["Factura No.","Factura","FacturaNo","Factura_Numero","Factura Id","FacturaID"])
+col_lin_desc   = col(lineas_df, ["Descripción","Descripcion"])
+col_lin_cant   = col(lineas_df, ["Cantidad"])
+col_lin_pu     = col(lineas_df, ["Precio Unitario","PU","PrecioUnitario"])
+col_lin_itbms  = col(lineas_df, ["ITBMS","IVA","Impuesto"])
+col_lin_cod    = col(lineas_df, ["Código","Codigo"])
 
 # ==========================
 # ÍTEMS (state)
 # ==========================
 if "line_items" not in st.session_state:
-    prev = st.session_state.get("items", [])
-    st.session_state["line_items"] = prev if isinstance(prev, list) else []
-    st.session_state.pop("items", None)
+    st.session_state["line_items"] = []
 
 # ==========================
 # TIPO DOC
@@ -188,85 +203,114 @@ doc_type = DOC_MAP[doc_humano]
 # CLIENTE
 # ==========================
 st.header("Datos del Cliente")
-nombres_clientes = [c.get("fields", {}).get("cliente", f"Cliente {i}") for i, c in enumerate(clientes, start=1)]
-cliente_idx = st.selectbox("Seleccione Cliente", range(len(nombres_clientes)), format_func=lambda x: nombres_clientes[x])
-cliente_fields: Dict[str, Any] = clientes[cliente_idx].get("fields", {}) or {}
+nombres_clientes = list(clientes_df[col_cli_nombre].astype(str).fillna("").values)
+idx_map = list(range(len(nombres_clientes)))
+cliente_idx = st.selectbox("Seleccione Cliente", idx_map, format_func=lambda x: nombres_clientes[x])
+cli_row = clientes_df.iloc[cliente_idx].to_dict()
 
 col1, col2 = st.columns(2)
 with col1:
-    st.text_input("RUC",       value=cliente_fields.get("RUC", ""),        disabled=True)
-    st.text_input("DV",        value=cliente_fields.get("DV", ""),         disabled=True)
-    st.text_area ("Dirección", value=cliente_fields.get("Dirección", ""),  disabled=True)
+    st.text_input("RUC",       value=_first_existing(cli_row, [col_cli_ruc]) , disabled=True)
+    st.text_input("DV",        value=_first_existing(cli_row, [col_cli_dv])  , disabled=True)
+    st.text_area ("Dirección", value=_first_existing(cli_row, [col_cli_dir]) , disabled=True)
 with col2:
-    st.text_input("Teléfono",  value=cliente_fields.get("Teléfono", ""),   disabled=True)
-    st.text_input("Correo",    value=cliente_fields.get("Correo", ""),     disabled=True)
+    st.text_input("Teléfono",  value=_first_existing(cli_row, [col_cli_tel]) , disabled=True)
+    st.text_input("Correo",    value=_first_existing(cli_row, [col_cli_mail]), disabled=True)
 
 # ==========================
-# NÚMERO DOC + AUTOCARGA DESDE FACTURAS
+# NÚMERO DOC + FACTURA PENDIENTE
 # ==========================
-facturas_pendientes = [
-    f for f in facturas
-    if ((f.get("fields", {}) or {}).get("Estado", "") or "").strip().lower() == "pendiente"
-]
-
-selected_factura_rec = None
+fact_pend = facturas_df
+if col_fac_estado:
+    fact_pend = fact_pend[(fact_pend[col_fac_estado].astype(str).str.strip().str.lower() == "pendiente")]
 
 if doc_type == "01":
-    if facturas_pendientes:
-        opciones_facturas = [(f.get("fields", {}) or {}).get("Factura No.", "") for f in facturas_pendientes]
-        idx_factura = st.selectbox(
-            "Seleccione Factura Pendiente",
-            range(len(opciones_facturas)),
-            format_func=lambda x: str(opciones_facturas[x])
-        )
-        numero_preview = str(opciones_facturas[idx_factura])
-        selected_factura_rec = facturas_pendientes[idx_factura]
+    if not fact_pend.empty and col_fac_num:
+        opciones_facturas = list(fact_pend[col_fac_num].astype(str).values)
+        idx_factura = st.selectbox("Seleccione Factura Pendiente", range(len(opciones_facturas)),
+                                   format_func=lambda x: opciones_facturas[x])
+        numero_preview = opciones_facturas[idx_factura]
+        factura_sel = fact_pend.iloc[idx_factura]
     else:
-        numero_preview = calcular_siguiente_factura_no(facturas)
+        # Siguiente correlativo simple desde CSV
+        try:
+            nums = pd.to_numeric(facturas_df[col_fac_num], errors="coerce").fillna(0).astype(int)
+            numero_preview = f"{(nums.max()+1):08d}"
+        except Exception:
+            numero_preview = "00000001"
+        factura_sel = None
 else:
-    numero_preview = calcular_siguiente_nc_no(notas_credito)
+    # Calcular correlativo para NC si tienes CSV de NC; por simplicidad, autoincremento aparte
+    numero_preview = "00000001"
+    factura_sel = None
 
-st.text_input("Factura No." if doc_type == "01" else "Número de Documento Fiscal", value=numero_preview, disabled=True)
-
-# Fecha Emisión (si la factura trae fecha, podrías mapearla aquí; por simplicidad usamos hoy)
+st.text_input("Número de Documento Fiscal", value=str(numero_preview), disabled=True)
 fecha_emision = st.date_input("Fecha Emisión", value=date.today())
 
-# Medio de Pago (por defecto desde la factura si existe)
+# Medio de pago por defecto
 medio_pago_opciones = ["Efectivo", "Débito", "Crédito"]
-fact_fields = (selected_factura_rec or {}).get("fields", {}) if selected_factura_rec else {}
-medio_pago_default  = (fact_fields.get("Medio de Pago") or "").strip().capitalize()
-if medio_pago_default not in medio_pago_opciones:
-    medio_pago_default = "Efectivo"
+medio_pago_default = "Efectivo"
+if factura_sel is not None and col_fac_pago and factura_sel.get(col_fac_pago):
+    mp = str(factura_sel[col_fac_pago]).strip().capitalize()
+    if mp in medio_pago_opciones:
+        medio_pago_default = mp
 
 # ==========================
-# AUTOCARGA DE ÍTEMS SI SELECCIONA FACTURA
+# AUTOCARGA DE ÍTEMS DESDE CSV (Líneas Factura)
 # ==========================
-if selected_factura_rec is not None:
+if doc_type == "01" and factura_sel is not None:
     if st.button("Cargar líneas desde la factura seleccionada"):
-        st.session_state["line_items"] = extraer_lineas_desde_factura_record(selected_factura_rec)
-        if not st.session_state["line_items"]:
-            st.warning("La factura no contiene líneas embebidas o no se pudieron leer los campos esperados.")
+        if lineas_df.empty:
+            st.warning("No se cargó el CSV de Líneas Factura.")
+        else:
+            df = lineas_df.copy()
+            if col_lin_facnum is None:
+                st.warning("No se encontró columna que relacione Líneas con la Factura (p. ej., 'Factura No.').")
+            else:
+                df = df[df[col_lin_facnum].astype(str) == str(numero_preview)]
+                nuevos = []
+                for _, r in df.iterrows():
+                    desc  = str(r.get(col_lin_desc, "")).strip() if col_lin_desc else "SIN DESCRIPCIÓN"
+                    cant  = _clean_num(r.get(col_lin_cant)) if col_lin_cant else 1.0
+                    pu    = _clean_num(r.get(col_lin_pu)) if col_lin_pu else 0.0
+                    tasa  = _clean_num(r.get(col_lin_itbms)) if col_lin_itbms else 0.0
+                    codigo = str(r.get(col_lin_cod, "")).strip() if col_lin_cod else ""
+                    valor_itbms = round(cant * pu * tasa, 2)
+                    nuevos.append({
+                        "codigo":         codigo,
+                        "descripcion":    desc or "SIN DESCRIPCIÓN",
+                        "cantidad":       float(cant),
+                        "precioUnitario": float(pu),
+                        "tasa":           float(tasa),
+                        "valorITBMS":     float(valor_itbms),
+                    })
+                st.session_state["line_items"] = nuevos
+                if not nuevos:
+                    st.warning("No se encontraron líneas para la factura seleccionada.")
 
 # ==========================
-# ÍTEMS UI
+# ÍTEMS UI (agregar manualmente también)
 # ==========================
 st.header("Ítems del documento (puedes agregar o editar)")
-nombres_productos = [
-    f"{(p.get('fields', {}) or {}).get('Código','')} | {(p.get('fields', {}) or {}).get('Descripción','')}"
-    for p in productos
-]
-prod_idx    = st.selectbox("Producto", range(len(nombres_productos)), format_func=lambda x: nombres_productos[x])
-prod_fields = productos[prod_idx].get("fields", {}) or {}
+# Combo productos para agregar rápido
+prod_labels = []
+for _, p in productos_df.iterrows():
+    cod = str(p.get(col_prod_cod, "") if col_prod_cod else "")
+    ds  = str(p.get(col_prod_desc, "") if col_prod_desc else "")
+    prod_labels.append(f"{cod} | {ds}")
 
-cantidad    = st.number_input("Cantidad", min_value=1.0, value=1.0, step=1.0)
-precio_unit = float(prod_fields.get("Precio Unitario", 0) or 0)
-itbms_rate  = float(prod_fields.get("ITBMS", 0) or 0)
+prod_idx = st.selectbox("Producto", range(len(prod_labels)), format_func=lambda x: prod_labels[x])
+p = productos_df.iloc[prod_idx].to_dict()
+
+cantidad = st.number_input("Cantidad", min_value=1.0, value=1.0, step=1.0)
+precio_unit = _clean_num(_first_existing(p, [col_prod_pu])) if col_prod_pu else 0.0
+itbms_rate  = _clean_num(_first_existing(p, [col_prod_itbms])) if col_prod_itbms else 0.0
 
 if st.button("Agregar ítem"):
     valor_itbms = round(itbms_rate * cantidad * precio_unit, 2)
     st.session_state["line_items"].append({
-        "codigo":         prod_fields.get("Código", ""),
-        "descripcion":    prod_fields.get("Descripción", ""),
+        "codigo":         _first_existing(p, [col_prod_cod]),
+        "descripcion":    _first_existing(p, [col_prod_desc]) or "SIN DESCRIPCIÓN",
         "cantidad":       float(cantidad),
         "precioUnitario": float(precio_unit),
         "tasa":           float(itbms_rate),
@@ -296,7 +340,8 @@ total_total = total_neto + total_itbms
 
 st.write(f"**Total Neto:** {total_neto:.2f}   **ITBMS:** {total_itbms:.2f}   **Total:** {total_total:.2f}")
 
-medio_pago = st.selectbox("Medio de Pago", medio_pago_opciones, index=medio_pago_opciones.index(medio_pago_default))
+medio_pago = st.selectbox("Medio de Pago", ["Efectivo", "Débito", "Crédito"],
+                          index=["Efectivo","Débito","Crédito"].index(medio_pago_default))
 emisor     = st.text_input("Nombre de quien emite el documento (obligatorio)", value=st.session_state.get("emisor", ""))
 if emisor:
     st.session_state["emisor"] = emisor
@@ -307,42 +352,27 @@ if emisor:
 BACKEND_URL = "https://ninox-factory-server.onrender.com"
 
 enviar_email = st.checkbox("Enviar CAFE por correo al cliente", value=True)
-email_destino_default = (cliente_fields.get("Correo") or "").strip()
+email_destino_default = str(_first_existing(cli_row, [col_cli_mail])).strip()
 email_to = st.text_input("Email destino", value=email_destino_default if enviar_email else "", disabled=not enviar_email)
 email_cc = st.text_input("CC (opcional, separa por comas)", value="", disabled=not enviar_email)
 
-def _ninox_refrescar_tablas():
-    st.session_state["facturas"]      = obtener_facturas()
-    st.session_state["notas_credito"] = obtener_notas_credito()
-
 # ==========================
-# PAYLOAD A DGI
+# PAYLOAD
 # ==========================
 def armar_payload_documento(
     *,
     doc_type: str,
     numero_documento: str,
     fecha_emision: date,
-    cliente_fields: Dict[str, Any],
+    cliente_row: Dict[str, Any],
     items: List[Dict[str, Any]],
     total_neto: float,
     total_itbms: float,
     total: float,
     medio_pago: str,
-    motivo_nc: str = "",
-    factura_afectada: str = "",
 ) -> Dict[str, Any]:
 
     forma_pago_codigo = {"Efectivo": "01", "Débito": "02", "Crédito": "03"}[medio_pago]
-    formato_cafe  = 3 if doc_type == "06" else 1
-    entrega_cafe  = 3 if doc_type == "06" else 1
-    tipo_venta    = "" if doc_type == "06" else 1
-
-    # Motivo + referencia de la factura afectada en 'informacionInteres'
-    info_interes = ""
-    if doc_type == "06":
-        ref = f" (afecta a la factura {factura_afectada.strip()})" if factura_afectada.strip() else ""
-        info_interes = (motivo_nc or "Nota de crédito") + ref
 
     lista_items = []
     for i in items:
@@ -378,21 +408,21 @@ def armar_payload_documento(
                 "naturalezaOperacion": "01",
                 "tipoOperacion": 1,
                 "destinoOperacion": 1,
-                "formatoCAFE": formato_cafe,
-                "entregaCAFE": entrega_cafe,
+                "formatoCAFE": 1,
+                "entregaCAFE": 1,
                 "envioContenedor": 1,
                 "procesoGeneracion": 1,
-                "tipoVenta": tipo_venta,
-                "informacionInteres": info_interes,
+                "tipoVenta": 1,
+                "informacionInteres": "",
                 "cliente": {
-                    "tipoClienteFE": "02" if (cliente_fields.get("RUC") or "").strip() else "01",
+                    "tipoClienteFE": "02" if str(_first_existing(cliente_row,[col_cli_ruc])).strip() else "01",
                     "tipoContribuyente": 1,
-                    "numeroRUC": (cliente_fields.get("RUC", "") or "").replace("-", ""),
-                    "digitoVerificadorRUC": cliente_fields.get("DV", ""),
-                    "razonSocial": cliente_fields.get("cliente", ""),
-                    "direccion": cliente_fields.get("Dirección", ""),
-                    "telefono1": cliente_fields.get("Teléfono", ""),
-                    "correoElectronico1": cliente_fields.get("Correo", ""),
+                    "numeroRUC": str(_first_existing(cliente_row,[col_cli_ruc])).replace("-", ""),
+                    "digitoVerificadorRUC": _first_existing(cliente_row,[col_cli_dv]),
+                    "razonSocial": _first_existing(cliente_row,[col_cli_nombre]),
+                    "direccion": _first_existing(cliente_row,[col_cli_dir]),
+                    "telefono1": _first_existing(cliente_row,[col_cli_tel]),
+                    "correoElectronico1": _first_existing(cliente_row,[col_cli_mail]),
                     "pais": "PA",
                 },
             },
@@ -407,7 +437,7 @@ def armar_payload_documento(
                 "totalFactura":       f"{total:.2f}",
                 "totalValorRecibido": f"{total:.2f}",
                 "vuelto":             "0.00",
-                "tiempoPago":         "1" if doc_type == "01" else "3",
+                "tiempoPago":         "1",
                 "nroItems":           str(len(lista_items)),
                 "totalTodosItems":    f"{total:.2f}",
                 "listaFormaPago": {
@@ -416,7 +446,6 @@ def armar_payload_documento(
                         "valorCuotaPagada": f"{total:.2f}",
                     }]
                 },
-                # Requisito del WS
                 "listaPagoPlazo": {
                     "pagoPlazo": [{
                         "fechaVenceCuota": f"{fecha_emision.isoformat()}T23:59:59-05:00",
@@ -429,7 +458,7 @@ def armar_payload_documento(
     return payload
 
 # ==========================
-# ENVIAR SIN GENERAR PDF LOCAL
+# ENVIAR
 # ==========================
 if st.button("Enviar Documento a DGI"):
     if not emisor.strip():
@@ -437,44 +466,32 @@ if st.button("Enviar Documento a DGI"):
     if not st.session_state["line_items"]:
         st.error("Debe agregar al menos un ítem o cargar las líneas desde la factura."); st.stop()
 
-    motivo_nc = ""
-    factura_afectada = ""
-    if doc_type == "06":
-        st.error("Para Nota de Crédito, habilita los campos correspondientes en la UI.")  # placeholder si luego activas NC
-        st.stop()
-
-    numero_documento = numero_preview
-
     try:
         payload = armar_payload_documento(
-            doc_type=doc_type,
-            numero_documento=numero_documento,
+            doc_type=DOC_MAP["Factura"],  # esta versión envia solo Factura; activa NC si la necesitas
+            numero_documento=str(numero_preview),
             fecha_emision=fecha_emision,
-            cliente_fields=cliente_fields,
+            cliente_row=cli_row,
             items=st.session_state["line_items"],
             total_neto=total_neto,
             total_itbms=total_itbms,
             total=total_total,
             medio_pago=medio_pago,
-            motivo_nc=motivo_nc,
-            factura_afectada=factura_afectada,
         )
 
         r = requests.post(f"{BACKEND_URL}/enviar-factura", json=payload, timeout=60)
         if r.ok:
             st.success(f"{doc_humano} enviada correctamente ✅")
             st.session_state["line_items"] = []
-            _ninox_refrescar_tablas()
 
-            # ===== Envío por email (opcional) =====
             if enviar_email and (email_to or "").strip():
                 email_json = {
                     "to": [e.strip() for e in (email_to or "").split(",") if e.strip()],
                     "cc": [e.strip() for e in (email_cc or "").split(",") if e.strip()],
-                    "subject": f"{'Nota de Crédito' if doc_type=='06' else 'Factura'} electrónica #{numero_documento}",
+                    "subject": f"Factura electrónica #{numero_documento}",
                     "body_html": f"""
                     <p>Estimado(a),</p>
-                    <p>Se ha generado su {'Nota de Crédito' if doc_type=='06' else 'Factura'} <b>#{numero_documento}</b>.</p>
+                    <p>Se ha generado su Factura <b>#{numero_documento}</b>.</p>
                     <p>Adjuntamos el CAFE oficial desde nuestro sistema.</p>
                     <p>Saludos,<br>IOM Panamá</p>
                     """,
@@ -482,7 +499,7 @@ if st.button("Enviar Documento a DGI"):
                         "codigoSucursalEmisor":  "0000",
                         "numeroDocumentoFiscal": str(numero_documento),
                         "puntoFacturacionFiscal":"001",
-                        "tipoDocumento":         doc_type,
+                        "tipoDocumento":         "01",
                         "tipoEmision":           "01",
                     }
                 }
@@ -506,10 +523,16 @@ if st.button("Enviar Documento a DGI"):
 with st.expander("Ayuda / Referencias"):
     st.markdown(
         """
-        - Tablas Ninox: `Clientes`, `Productos`, `Facturas`, **`Nota de Credito`**.
-        - Para cargar los ítems de una factura pendiente, usa el botón **"Cargar líneas desde la factura seleccionada"**.
-        - No se genera PDF en la app; el correo se envía llamando a **/enviar-cafe-email** en tu backend.
-        - Requisitos WS: `listaPagoPlazo.pagoPlazo[0]` con `fechaVenceCuota` y `valorCuota`.
-        - El campo de nombre del cliente se espera como **`cliente`** en la tabla `Clientes`.
+        **Uso con CSV**
+        1) Exporta desde Ninox las tablas: *Clientes*, *Productos*, *Facturas*, *Líneas Factura* (CSV).
+        2) Cárgalas arriba en esta página.
+        3) Selecciona la factura pendiente y pulsa **“Cargar líneas…”** para traer los ítems.
+        4) Verifica totales y envía.
+
+        **Notas**
+        - Los nombres de columnas son flexibles (se aceptan variantes comunes).
+        - Si el CSV de *Líneas Factura* no trae una columna que vincule con la factura (p. ej., “Factura No.”),
+          agrega una antes de subir o indícame qué columna usar y lo adapto.
         """
     )
+
