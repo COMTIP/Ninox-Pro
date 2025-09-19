@@ -462,4 +462,3 @@ with st.expander("Ayuda / Referencias"):
         - El parser numérico acepta `$25,50`, `1.234,56`, etc.
         """
     )
-
