@@ -32,9 +32,9 @@ if st.sidebar.button("Cerrar sesión"):
 # ==========================
 # NINOX API CONFIG (SOLO-API)
 # ==========================
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"  # <-- coloca tu token válido
-TEAM_ID     = "ihp8o8AaLzfodwc4J"
-DATABASE_ID = "u2g01uaua8tu"
+API_TOKEN   = "PON_AQUI_TU_TOKEN"             # <-- coloca tu token válido
+TEAM_ID     = "fhmgaLpFghyh5sNHh"             # <-- de tu URL
+DATABASE_ID = "er0sibgl3dug"                  # <-- de tu URL
 
 BASE_URL = f"https://api.ninox.com/v1/teams/{TEAM_ID}/databases/{DATABASE_ID}"
 HEADERS  = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
@@ -43,7 +43,40 @@ HEADERS  = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application
 TABLE_CLIENTES       = "Clientes"
 TABLE_PRODUCTOS      = "Productos"
 TABLE_FACTURAS       = "Facturas"
-TABLE_LINEAS_FACTURA = "Lineas Factura"  # si tu tabla no tiene espacio, cámbiala a "LineasFactura"
+TABLE_LINEAS_FACTURA = "Lineas Factura"       # si no tiene espacio, cámbiala a "LineasFactura"
+
+# ==========================
+# DEBUG / DIAGNÓSTICO
+# ==========================
+def ping_ninox():
+    url = f"{BASE_URL}/tables"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        st.write("Ping /tables →", r.status_code)
+        st.code(r.text[:1500])
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+
+def test_clientes():
+    url = f"{BASE_URL}/tables/{TABLE_CLIENTES.replace(' ','%20')}/records"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        st.write("GET Clientes →", r.status_code)
+        if r.ok:
+            data = r.json()
+            st.write(f"Total registros: {len(data)}")
+            if data:
+                st.json(data[0])
+        else:
+            st.code(r.text[:1500])
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+
+with st.sidebar.expander("Diagnóstico API"):
+    if st.button("Probar conexión Ninox"):
+        ping_ninox()
+    if st.button("Test tabla Clientes"):
+        test_clientes()
 
 # ==========================
 # UTILIDADES NINOX
@@ -62,9 +95,10 @@ def _ninox_get(path: str, params: Optional[Dict[str, Any]] = None, page_size: in
             break
 
         if not r.ok:
-            # Mensaje claro cuando el plan no permite API
-            if r.status_code == 403:
-                st.error(f"Ninox 403 — Tu plan no permite acceso continuo a la API. {r.text}")
+            if r.status_code == 401:
+                st.error("Ninox 401 — Token inválido o no autorizado para este equipo/base.")
+            elif r.status_code == 403:
+                st.error(f"Ninox 403 — El usuario/token no tiene permisos o el plan no permite la API. {r.text}")
             else:
                 st.error(f"Error Ninox GET {path}: {r.status_code} — {r.text}")
             break
@@ -77,7 +111,6 @@ def _ninox_get(path: str, params: Optional[Dict[str, Any]] = None, page_size: in
     return out
 
 def obtener_tabla(tablename: str) -> List[Dict[str, Any]]:
-    # URL-encode sencillo para espacios
     safe_name = tablename.replace(" ", "%20")
     return _ninox_get(f"/tables/{safe_name}/records")
 
@@ -91,7 +124,6 @@ def obtener_facturas() -> List[Dict[str, Any]]:
     return obtener_tabla(TABLE_FACTURAS)
 
 def obtener_lineas_factura() -> List[Dict[str, Any]]:
-    # intenta con espacio y sin espacio
     datos = obtener_tabla(TABLE_LINEAS_FACTURA)
     if not datos and " " in TABLE_LINEAS_FACTURA:
         alt = TABLE_LINEAS_FACTURA.replace(" ", "")
@@ -116,10 +148,6 @@ def _fields(rec: Dict[str, Any]) -> Dict[str, Any]:
     return (rec.get("fields", {}) or {})
 
 def _extraer_lineas_embebidas(factura_rec: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Si tu tabla Facturas tiene un subtable embebido (p.ej. 'LíneasFactura' o 'LineasFactura'),
-    lo toma directo del record.
-    """
     f = _fields(factura_rec)
     posibles = ["LíneasFactura", "LineasFactura", "Líneas Factura", "Lineas Factura"]
     lineas = None
@@ -127,14 +155,13 @@ def _extraer_lineas_embebidas(factura_rec: Dict[str, Any]) -> List[Dict[str, Any
         if k in f:
             lineas = f[k]
             break
-
     out: List[Dict[str, Any]] = []
     if isinstance(lineas, list):
         for row in lineas:
             rf = row.get("fields", row) if isinstance(row, dict) else {}
             desc   = (rf.get("Descripción") or rf.get("Descripcion") or "").strip()
             cant   = _clean_num(rf.get("Cantidad"))
-            pu     = _clean_num(rf.get("Precio Unitario"))
+            pu     = _clean_num(rf.get("Precio Unitario") or rf.get("PU"))
             tasa   = _clean_num(rf.get("ITBMS"))
             itbmsv = round(cant * pu * tasa, 2)
             out.append({
@@ -148,14 +175,9 @@ def _extraer_lineas_embebidas(factura_rec: Dict[str, Any]) -> List[Dict[str, Any
     return out
 
 def _extraer_lineas_por_tabla(numero_factura: str, lineas_api: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Si las líneas están en una tabla aparte (Lineas Factura), filtramos por relación.
-    Campos probables: 'Factura No.' (texto/num), o enlace-relación (ID) — adapta aquí si usas otro campo.
-    """
     out: List[Dict[str, Any]] = []
     for rec in lineas_api:
         rf = _fields(rec)
-        # Match por "Factura No." (ajusta si usas otro campo de relación)
         rel_ok = False
         for key in ["Factura No.", "Factura", "FacturaNo", "Factura_Numero"]:
             if key in rf and str(rf[key]).strip() == str(numero_factura).strip():
@@ -166,7 +188,7 @@ def _extraer_lineas_por_tabla(numero_factura: str, lineas_api: List[Dict[str, An
 
         desc   = (rf.get("Descripción") or rf.get("Descripcion") or "").strip()
         cant   = _clean_num(rf.get("Cantidad"))
-        pu     = _clean_num(rf.get("Precio Unitario"))
+        pu     = _clean_num(rf.get("Precio Unitario") or rf.get("PU"))
         tasa   = _clean_num(rf.get("ITBMS"))
         itbmsv = round(cant * pu * tasa, 2)
         out.append({
@@ -206,10 +228,10 @@ if "facturas" not in st.session_state:
 if "lineas_factura" not in st.session_state:
     st.session_state["lineas_factura"] = obtener_lineas_factura()
 
-clientes  = st.session_state["clientes"]
-productos = st.session_state["productos"]
-facturas  = st.session_state["facturas"]
-lineas    = st.session_state["lineas_factura"]
+clientes  = st.session_state.get("clientes", [])
+productos = st.session_state.get("productos", [])
+facturas  = st.session_state.get("facturas", [])
+lineas    = st.session_state.get("lineas_factura", [])
 
 if not clientes:
     st.warning("No hay clientes en Ninox (API)."); st.stop()
@@ -237,7 +259,6 @@ doc_type = DOC_MAP[doc_humano]
 # ==========================
 st.header("Datos del Cliente")
 
-# Lista legible de clientes
 def _nombre_cliente(c: Dict[str, Any], idx: int) -> str:
     f = _fields(c)
     return f.get("cliente") or f.get("Nombre") or f"Cliente {idx}"
@@ -271,8 +292,7 @@ if doc_type == "01":
     else:
         numero_preview = calcular_siguiente_factura_no(facturas)
 else:
-    # Si luego agregas NC por API, genera correlativo según tu tabla de NC
-    numero_preview = "00000001"
+    numero_preview = "00000001"  # correlativo NC si luego se integra la tabla de NC
 
 st.text_input("Número de Documento Fiscal", value=numero_preview, disabled=True)
 fecha_emision = st.date_input("Fecha Emisión", value=date.today())
@@ -291,13 +311,9 @@ if selected_factura_rec:
 st.divider()
 if selected_factura_rec is not None:
     if st.button("Cargar líneas desde la factura (API)"):
-        # 1) Intento subtabla embebida
         items = _extraer_lineas_embebidas(selected_factura_rec)
-
-        # 2) Si no hay subtabla, intento por tabla Lineas Factura (match por 'Factura No.')
         if not items:
             items = _extraer_lineas_por_tabla(numero_preview, lineas)
-
         st.session_state["line_items"] = items
         if not items:
             st.warning("No se encontraron líneas (ni subtabla embebida ni coincidencias en 'Lineas Factura').")
@@ -306,7 +322,7 @@ if selected_factura_rec is not None:
 # ÍTEMS: AGREGAR MANUAL (desde Productos)
 # ==========================
 st.header("Ítems del documento (puedes agregar o editar)")
-# Menú productos (código | descripción)
+
 def _label_prod(p: Dict[str, Any]) -> str:
     f = _fields(p)
     return f"{f.get('Código','') or f.get('Codigo','')} | {f.get('Descripción','') or f.get('Descripcion','')}"
@@ -492,7 +508,6 @@ if st.button("Enviar Documento a DGI"):
     if not st.session_state["line_items"]:
         st.error("Debe agregar al menos un ítem o cargar las líneas desde la factura (API)."); st.stop()
 
-    # NC no activada en esta versión (se puede habilitar rápido si la necesitas)
     motivo_nc = ""
     factura_afectada = ""
 
@@ -503,9 +518,9 @@ if st.button("Enviar Documento a DGI"):
             fecha_emision=fecha_emision,
             cliente_fields=cliente_fields,
             items=st.session_state["line_items"],
-            total_neto=sum(i["cantidad"] * i["precioUnitario"] for i in st.session_state["line_items"]),
-            total_itbms=sum(i["valorITBMS"] for i in st.session_state["line_items"]),
-            total=sum(i["cantidad"] * i["precioUnitario"] + i["valorITBMS"] for i in st.session_state["line_items"]),
+            total_neto=total_neto,
+            total_itbms=total_itbms,
+            total=total_total,
             medio_pago=medio_pago,
             motivo_nc=motivo_nc,
             factura_afectada=factura_afectada,
@@ -517,7 +532,6 @@ if st.button("Enviar Documento a DGI"):
             st.session_state["line_items"] = []
             _ninox_refrescar_tablas()
 
-            # ===== Envío por email (opcional) =====
             if enviar_email and (email_to or "").strip():
                 email_json = {
                     "to": [e.strip() for e in (email_to or "").split(",") if e.strip()],
@@ -557,13 +571,9 @@ if st.button("Enviar Documento a DGI"):
 with st.expander("Ayuda / Referencias (API Ninox)"):
     st.markdown(
         """
-        - Esta versión usa **exclusivamente la API de Ninox** (sin CSV).
-        - Asegura que tu plan Ninox tenga acceso a API (Business/Enterprise).
+        - Usa **exclusivamente la API de Ninox**; necesitas token válido y permisos en el team/base.
+        - IDs usados: **TEAM_ID=fhmgaLpFghyh5sNHh**, **DATABASE_ID=er0sibgl3dug**.
         - Tablas esperadas: `Clientes`, `Productos`, `Facturas`, `Lineas Factura` (o `LineasFactura`).
-        - Para cargar ítems: selecciona una **Factura Pendiente** y pulsa **“Cargar líneas desde la factura (API)”**.
-        - Si tus campos tienen otro nombre (p. ej. “PU”, “ITBMS %”, “Cliente Nombre”), dímelos y te ajusto el parser.
+        - Diagnóstico: usa **Probar conexión Ninox** y **Test tabla Clientes** en la barra lateral.
         """
     )
-
-
-
